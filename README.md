@@ -26,25 +26,28 @@ HUD.
 | The Sharp      | Market & odds reader  |
 | The Newshound  | Breaking news/recency |
 
-Experts run on **Claude Sonnet 4.6**; the synthesizer on **Claude Opus 4.8** (adaptive
-thinking, `effort: high`), both with the `web_search_20260209` server tool.
+Experts run on **Sonnet**; the synthesizer on **Opus** — both via the **Claude Agent SDK**,
+which uses your local Claude Code login (your subscription), with the `WebSearch` tool.
+No API key required.
 
 ## Setup
 
+This runs **locally** on your Claude subscription (no API key, no per-call billing):
+
 ```bash
-cp .env.example .env        # add your ANTHROPIC_API_KEY
+claude            # log in once via /login  (or: claude setup-token)
 npm install
-npm run dev                 # http://localhost:3000
+npm run dev       # http://localhost:3000
 ```
 
-Required env: `ANTHROPIC_API_KEY`. Optional: `UPSHOT_API_BASE`.
+Make sure `ANTHROPIC_API_KEY` is **not** set in your environment — if it is, the Agent SDK
+will bill the API instead of using your subscription. Optional: `UPSHOT_API_BASE`.
 
-## Deploy (Vercel)
+> Each query spawns the local `claude` CLI under the hood, so the `claude` binary must be on
+> your PATH (it is, if you use Claude Code). Web search runs headless (permissions bypassed
+> for this trusted local app).
 
-Push to a repo, import in Vercel, set `ANTHROPIC_API_KEY`. The `/api/council` route sets
-`maxDuration = 300` for the full deliberation.
-
-> **Bunny Shield note:** the Upshot API flags IPs. If Vercel's IP is flagged, server-side
+> **Bunny Shield note:** the Upshot API flags IPs. If your IP is flagged, server-side
 > card fetches return the HTML challenge — the UI then prompts you to paste the card JSON
 > from your authenticated browser. See `upshot-api/BUNNY_SHIELD.md`.
 

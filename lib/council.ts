@@ -1,18 +1,11 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { Card, CouncilEvent, Expert } from "./types";
 import { EXPERTS } from "./experts";
 import { fromMicro } from "./upshot";
 
-const EXPERT_MODEL = "claude-sonnet-4-6";
-const SYNTH_MODEL = "claude-opus-4-8";
-
-// Beta namespace because adaptive thinking + output_config.effort are typed there.
-type BetaParams = Anthropic.Beta.Messages.MessageCreateParamsStreaming;
-type BetaTool = Anthropic.Beta.Messages.BetaToolUnion;
-
-const WEB_TOOLS: BetaTool[] = [
-  { type: "web_search_20260209", name: "web_search" } as unknown as BetaTool,
-];
+// Model aliases resolve against your Claude subscription via the local CLI.
+const EXPERT_MODEL = "sonnet";
+const SYNTH_MODEL = "opus";
 
 type Emit = (event: CouncilEvent) => void;
 
@@ -53,33 +46,53 @@ outcome (e.g. "ETH closes above $4000"). If the predicted outcome happens, the c
 You are evaluating whether this card's predicted outcome will occur — i.e. the probability it WINS — and
 whether buying it at the current marketplace price is a good bet.`;
 
-// Stamped at request time; kept out of any cached prefix.
 const today = () => new Date().toISOString().slice(0, 10);
 
 /**
- * Stream a beta Messages request, forwarding text deltas to `onText`.
- * Returns the final stop_reason. Web search runs server-side automatically.
+ * Run one Agent SDK query, forwarding streamed text deltas to `onText`.
+ * Returns the final assistant text. Uses the local Claude subscription;
+ * WebSearch/WebFetch run headless (permissions bypassed for this trusted app).
  */
-async function streamBeta(
-  client: Anthropic,
-  params: Omit<BetaParams, "stream">,
+async function runQuery(
+  prompt: string,
+  opts: { system: string; model: string; tools: string[]; maxTurns: number },
   onText: (text: string) => void
-): Promise<string | null> {
-  const stream = await client.beta.messages.create({ ...params, stream: true });
-  let stopReason: string | null = null;
-  for await (const event of stream) {
-    if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-      onText(event.delta.text);
-    } else if (event.type === "message_delta" && event.delta.stop_reason) {
-      stopReason = event.delta.stop_reason;
+): Promise<string> {
+  const options: Options = {
+    systemPrompt: opts.system,
+    model: opts.model,
+    allowedTools: opts.tools,
+    includePartialMessages: true,
+    maxTurns: opts.maxTurns,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    // Don't inherit the user's CLAUDE.md / settings — keep runs isolated.
+    settingSources: [],
+  };
+
+  let streamed = "";
+  let finalText = "";
+
+  for await (const message of query({ prompt, options })) {
+    if (message.type === "stream_event") {
+      const ev = message.event as {
+        type: string;
+        delta?: { type?: string; text?: string };
+      };
+      if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
+        streamed += ev.delta.text;
+        onText(ev.delta.text);
+      }
+    } else if (message.type === "result") {
+      if (message.subtype === "success") finalText = message.result;
     }
   }
-  return stopReason;
+
+  return finalText.trim() || streamed.trim();
 }
 
 /** Run one expert turn with web search; forwards deltas and returns full text. */
 async function runExpert(
-  client: Anthropic,
   expert: Expert,
   userPrompt: string,
   round: number,
@@ -87,23 +100,12 @@ async function runExpert(
 ): Promise<string> {
   emit({ type: "expert_start", expertId: expert.id, name: expert.name, bias: expert.bias, round });
 
-  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use the web_search tool to research current facts before you commit to a number. Cite what you find.`;
+  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use the WebSearch tool to research current facts before you commit to a number. Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
 
-  let full = "";
-  await streamBeta(
-    client,
-    {
-      model: EXPERT_MODEL,
-      max_tokens: 4000,
-      thinking: { type: "adaptive" },
-      system,
-      tools: WEB_TOOLS,
-      messages: [{ role: "user", content: userPrompt }],
-    },
-    (text) => {
-      full += text;
-      emit({ type: "delta", expertId: expert.id, round, text });
-    }
+  const full = await runQuery(
+    userPrompt,
+    { system, model: EXPERT_MODEL, tools: ["WebSearch", "WebFetch"], maxTurns: 16 },
+    (text) => emit({ type: "delta", expertId: expert.id, round, text })
   );
 
   emit({ type: "expert_done", expertId: expert.id, round });
@@ -117,7 +119,6 @@ async function runExpert(
  *   Synthesis — Opus weighs everything into a final verdict (streamed)
  */
 export async function runCouncil(card: Card, emit: Emit): Promise<void> {
-  const client = new Anthropic();
   const brief = cardBrief(card);
 
   // ---- Round 1: independent research ----
@@ -126,7 +127,7 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
   const round1Prompt = `Here is the card under review:\n\n${brief}\n\nResearch this outcome and give your independent assessment. End your response with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
   const round1 = await Promise.all(
-    EXPERTS.map((e) => runExpert(client, e, round1Prompt, 1, emit))
+    EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit))
   );
 
   // ---- Round 2: rebuttal / deliberation ----
@@ -142,7 +143,7 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
 
       const prompt = `The card under review:\n\n${brief}\n\nHere are the other council members' first-round takes:\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Research further if needed. Then give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
-      return runExpert(client, e, prompt, 2, emit);
+      return runExpert(e, prompt, 2, emit);
     })
   );
 
@@ -161,16 +162,9 @@ disagreement is most informative. Be decisive but honest about uncertainty.\n\n$
 
   const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
 
-  await streamBeta(
-    client,
-    {
-      model: SYNTH_MODEL,
-      max_tokens: 4000,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "high" },
-      system: synthSystem,
-      messages: [{ role: "user", content: synthPrompt }],
-    },
+  await runQuery(
+    synthPrompt,
+    { system: synthSystem, model: SYNTH_MODEL, tools: [], maxTurns: 2 },
     (text) => emit({ type: "verdict_delta", text })
   );
 
