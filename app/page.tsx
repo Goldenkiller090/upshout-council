@@ -301,6 +301,13 @@ export default function Home() {
         </>
       )}
 
+      {card && Object.values(experts).some((e) => e.r2.text) && (
+        <>
+          <div className="section-label">THE DEBATE FLOOR · WHO CHALLENGED WHOM</div>
+          <DebateArena experts={experts} />
+        </>
+      )}
+
       {verdict && <Verdict text={verdict} />}
 
       {card && (
@@ -346,6 +353,151 @@ function Round({ label, data, mentions }: { label: string; data: RoundData; ment
         </div>
       )}
     </>
+  );
+}
+
+type Exchange = { from: string; to: string; text: string };
+
+function cleanSnippet(s: string): string {
+  return s
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Derive directed challenges from round-2 text: a sentence in pilot A's round-2
+// take that names pilot B is an A→B exchange.
+function debateExchanges(experts: Record<string, ExpertState>): Exchange[] {
+  const res: Exchange[] = [];
+  for (const e of EXPERTS) {
+    const txt = experts[e.id]?.r2.text;
+    if (!txt) continue;
+    const sentences = txt.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/);
+    const seen = new Set<string>();
+    for (const s of sentences) {
+      MENTION_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = MENTION_RE.exec(s))) {
+        const to = MENTIONS[m[1]];
+        if (!to || to === e.id) continue;
+        const key = `${e.id}->${to}`;
+        if (seen.has(key)) continue; // one exchange per directed pair per speaker
+        seen.add(key);
+        const snip = cleanSnippet(s);
+        if (snip.length > 12) res.push({ from: e.id, to, text: snip.slice(0, 220) });
+      }
+    }
+  }
+  return res;
+}
+
+const shortName = (id: string) => (EXPERTS.find((e) => e.id === id)?.name ?? id).replace("The ", "");
+
+function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const exchanges = debateExchanges(experts);
+  const edges = Array.from(new Set(exchanges.map((x) => `${x.from}->${x.to}`))).map((k) => {
+    const [from, to] = k.split("->");
+    return { from, to };
+  });
+
+  const W = 760, H = 420, cx = W / 2, cy = 196, R = 150, nodeR = 30;
+  const N = EXPERTS.length;
+  const pos = Object.fromEntries(
+    EXPERTS.map((e, i) => {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / N;
+      return [e.id, { x: cx + R * Math.cos(a), y: cy + R * Math.sin(a) }];
+    })
+  ) as Record<string, { x: number; y: number }>;
+
+  const pull = (p: { x: number; y: number }, t: { x: number; y: number }, d: number) => {
+    const dx = t.x - p.x, dy = t.y - p.y, l = Math.hypot(dx, dy) || 1;
+    return { x: p.x + (dx / l) * d, y: p.y + (dy / l) * d };
+  };
+
+  return (
+    <div className="debate">
+      <svg viewBox={`0 0 ${W} ${H}`} className="arena" role="img" aria-label="Debate graph">
+        <defs>
+          {EXPERTS.map((e) => (
+            <marker key={e.id} id={`arw-${e.id}`} markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+              <path d="M0,0 L9,4.5 L0,9 Z" fill={`var(--${e.id})`} />
+            </marker>
+          ))}
+        </defs>
+
+        {edges.map(({ from, to }, i) => {
+          const a = pos[from], b = pos[to];
+          const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+          const off = 30;
+          const ctrl = { x: mx - (dy / len) * off, y: my + (dx / len) * off };
+          const sa = pull(a, ctrl, nodeR + 2);
+          const eb = pull(b, ctrl, nodeR + 8);
+          const active = !hovered || hovered === from || hovered === to;
+          return (
+            <path
+              key={i}
+              d={`M ${sa.x} ${sa.y} Q ${ctrl.x} ${ctrl.y} ${eb.x} ${eb.y}`}
+              fill="none"
+              stroke={`var(--${from})`}
+              strokeWidth={hovered === from ? 2.4 : 1.6}
+              markerEnd={`url(#arw-${from})`}
+              opacity={active ? 0.85 : 0.12}
+            />
+          );
+        })}
+
+        {EXPERTS.map((e, i) => {
+          const p = pos[e.id];
+          const { prob } = readout(experts[e.id]);
+          const dim = hovered && hovered !== e.id && !edges.some((g) => (g.from === hovered && g.to === e.id) || (g.to === hovered && g.from === e.id));
+          return (
+            <g
+              key={e.id}
+              transform={`translate(${p.x},${p.y})`}
+              onMouseEnter={() => setHovered(e.id)}
+              onMouseLeave={() => setHovered(null)}
+              style={{ cursor: "pointer", opacity: dim ? 0.3 : 1 }}
+            >
+              <circle r={nodeR} fill="#080a18" stroke={`var(--${e.id})`} strokeWidth={2} />
+              <text textAnchor="middle" y={-2} className="node-name" fill={`var(--${e.id})`}>
+                {shortName(e.id).toUpperCase()}
+              </text>
+              <text textAnchor="middle" y={13} className="node-prob" fill="#cdd6ea">
+                {prob != null ? `${prob}%` : "··"}
+              </text>
+              <text textAnchor="middle" y={nodeR + 16} className="node-tag" fill="var(--dim)">
+                P{String(i + 1).padStart(2, "0")}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="exchanges">
+        {exchanges.length === 0 ? (
+          <div className="exch-empty">Pilots are taking the floor…</div>
+        ) : (
+          exchanges.map((x, i) => (
+            <div
+              className="exch"
+              key={i}
+              onMouseEnter={() => setHovered(x.from)}
+              onMouseLeave={() => setHovered(null)}
+            >
+              <div className="exch-head">
+                <span style={{ color: `var(--${x.from})` }}>{shortName(x.from)}</span>
+                <span className="arrow">▸ challenges ▸</span>
+                <span style={{ color: `var(--${x.to})` }}>{shortName(x.to)}</span>
+              </div>
+              <div className="exch-body">“{x.text}”</div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 

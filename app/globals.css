@@ -648,6 +648,83 @@ textarea {
 .verdict-md th,
 .verdict-md td { padding: 5px 10px; }
 
+/* ---- Debate floor (courtroom graph) ---- */
+.debate {
+  display: grid;
+  grid-template-columns: minmax(380px, 1.1fr) 1fr;
+  gap: 22px;
+  align-items: start;
+  border: 1px solid var(--line-strong);
+  background: rgba(8, 10, 24, 0.5);
+  padding: 18px 20px 22px;
+  margin-bottom: 10px;
+}
+.arena {
+  width: 100%;
+  height: auto;
+  border-right: 1px solid var(--line);
+}
+.arena path { transition: opacity 0.2s, stroke-width 0.2s; }
+.node-name {
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.node-prob {
+  font-family: var(--display);
+  font-size: 13px;
+}
+.node-tag {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+}
+
+.exchanges {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.exch-empty {
+  color: var(--dim);
+  font-style: italic;
+  font-size: 13px;
+}
+.exch {
+  border-left: 2px solid var(--line-strong);
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 0.15s;
+}
+.exch:hover { background: rgba(255, 255, 255, 0.05); }
+.exch-head {
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 5px;
+}
+.exch-head .arrow {
+  color: var(--dim);
+  font-family: var(--hud);
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.exch-body {
+  font-size: 13px;
+  color: #c4cfe6;
+  line-height: 1.5;
+}
+
+@media (max-width: 860px) {
+  .debate { grid-template-columns: 1fr; }
+  .arena { border-right: none; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+}
+
 /* ---- Verdict / race result ---- */
 .verdict {
   position: relative;

@@ -188,7 +188,7 @@ biases (a quant, a domain insider, a contrarian, a market/odds reader, and a new
 and debated a card. Weigh their arguments — don't just average them. Note where they agree and where the
 disagreement is most informative. Be decisive but honest about uncertainty.\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}.`;
 
-  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
+  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the five pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
 
   await runQuery(
     synthPrompt,
