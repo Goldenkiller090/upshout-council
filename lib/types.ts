@@ -44,6 +44,8 @@ export type CouncilEvent =
   | { type: "card"; card: Card }
   | { type: "expert_start"; expertId: string; name: string; bias: string; round: number }
   | { type: "delta"; expertId: string; round: number; text: string }
+  | { type: "think"; expertId: string; round: number; text: string }
+  | { type: "tool"; expertId: string; round: number; tool: string; detail: string }
   | { type: "expert_done"; expertId: string; round: number }
   | { type: "verdict_delta"; text: string }
   | { type: "done" }

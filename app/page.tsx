@@ -5,11 +5,15 @@ import type { Card, CouncilEvent } from "@/lib/types";
 import { EXPERTS } from "@/lib/experts";
 import { fromMicro } from "@/lib/upshot";
 
-type ExpertState = { round1: string; round2: string; active: boolean };
+type RoundData = { text: string; think: string; tools: { tool: string; detail: string }[] };
+type ExpertState = { r1: RoundData; r2: RoundData; active: boolean };
+
+const emptyRound = (): RoundData => ({ text: "", think: "", tools: [] });
+const emptyExpert = (): ExpertState => ({ r1: emptyRound(), r2: emptyRound(), active: false });
 
 // Pull the latest probability + lean an expert committed to (round 2 wins over round 1).
 function readout(st?: ExpertState): { prob: number | null; lean: string | null } {
-  const text = `${st?.round1 ?? ""}\n${st?.round2 ?? ""}`;
+  const text = `${st?.r1.text ?? ""}\n${st?.r2.text ?? ""}`;
   const probs = [...text.matchAll(/PROBABILITY:\s*(\d{1,3})/gi)];
   const leans = [...text.matchAll(/LEAN:\s*(BUY|HOLD|PASS)/gi)];
   const prob = probs.length ? Math.min(100, parseInt(probs[probs.length - 1][1], 10)) : null;
@@ -30,11 +34,7 @@ export default function Home() {
   const fetching = useRef(false);
 
   function resetRun() {
-    setExperts(
-      Object.fromEntries(
-        EXPERTS.map((e) => [e.id, { round1: "", round2: "", active: false }])
-      )
-    );
+    setExperts(Object.fromEntries(EXPERTS.map((e) => [e.id, emptyExpert()])));
     setVerdict("");
     setError("");
     setStatus("");
@@ -135,20 +135,37 @@ export default function Home() {
       case "expert_start":
         setExperts((prev) => ({
           ...prev,
-          [ev.expertId]: { ...prev[ev.expertId], active: true },
+          [ev.expertId]: { ...(prev[ev.expertId] ?? emptyExpert()), active: true },
         }));
         break;
       case "delta":
         setExperts((prev) => {
-          const cur = prev[ev.expertId] ?? { round1: "", round2: "", active: true };
-          const key = ev.round === 1 ? "round1" : "round2";
-          return { ...prev, [ev.expertId]: { ...cur, [key]: cur[key] + ev.text } };
+          const cur = prev[ev.expertId] ?? emptyExpert();
+          const rk = ev.round === 1 ? "r1" : "r2";
+          return { ...prev, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], text: cur[rk].text + ev.text } } };
+        });
+        break;
+      case "think":
+        setExperts((prev) => {
+          const cur = prev[ev.expertId] ?? emptyExpert();
+          const rk = ev.round === 1 ? "r1" : "r2";
+          return { ...prev, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], think: cur[rk].think + ev.text } } };
+        });
+        break;
+      case "tool":
+        setExperts((prev) => {
+          const cur = prev[ev.expertId] ?? emptyExpert();
+          const rk = ev.round === 1 ? "r1" : "r2";
+          return {
+            ...prev,
+            [ev.expertId]: { ...cur, [rk]: { ...cur[rk], tools: [...cur[rk].tools, { tool: ev.tool, detail: ev.detail }] } },
+          };
         });
         break;
       case "expert_done":
         setExperts((prev) => ({
           ...prev,
-          [ev.expertId]: { ...prev[ev.expertId], active: false },
+          [ev.expertId]: { ...(prev[ev.expertId] ?? emptyExpert()), active: false },
         }));
         break;
       case "verdict_delta":
@@ -271,25 +288,11 @@ export default function Home() {
                     {lean && <span className={`lean ${lean}`}>{lean}</span>}
                   </div>
 
-                  {st?.round1 && (
-                    <>
-                      <div className="round-tag">
-                        ROUND 1 · <b>RESEARCH</b>
-                      </div>
-                      <div className="body md-sm">
-                        <Markdown source={st.round1} />
-                      </div>
-                    </>
+                  {st && hasRound(st.r1) && (
+                    <Round label="ROUND 1 · RESEARCH" data={st.r1} mentions={false} />
                   )}
-                  {st?.round2 && (
-                    <>
-                      <div className="round-tag">
-                        ROUND 2 · <b>DEBATE</b>
-                      </div>
-                      <div className="body md-sm">
-                        <Markdown source={st.round2} />
-                      </div>
-                    </>
+                  {st && hasRound(st.r2) && (
+                    <Round label="ROUND 2 · DEBATE" data={st.r2} mentions />
                   )}
                 </div>
               );
@@ -309,15 +312,66 @@ export default function Home() {
   );
 }
 
+const hasRound = (r: RoundData) => !!(r.text || r.think || r.tools.length);
+
+const toolIcon = (t: string) => (t === "WebSearch" ? "🔍" : t === "WebFetch" ? "🌐" : "⚙");
+
+// One round of an expert's work: live search/fetch activity, thinking, then analysis.
+function Round({ label, data, mentions }: { label: string; data: RoundData; mentions: boolean }) {
+  const [a, b] = label.split("·");
+  return (
+    <>
+      <div className="round-tag">
+        {a}·<b>{b}</b>
+      </div>
+      {data.tools.length > 0 && (
+        <div className="activity">
+          {data.tools.map((t, i) => (
+            <div className="act" key={i}>
+              <span className="actk">{toolIcon(t.tool)}</span>
+              <span className="actd">{t.detail || t.tool}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {data.think.trim() && (
+        <details className="think">
+          <summary>internal reasoning</summary>
+          <div className="think-body">{data.think}</div>
+        </details>
+      )}
+      {data.text && (
+        <div className="body md-sm">
+          <Markdown source={data.text} mentions={mentions} />
+        </div>
+      )}
+    </>
+  );
+}
+
+function CardImage({ image, name }: { image?: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  // image may be a bare Arweave tx id or a full URL.
+  const src = image
+    ? /^https?:\/\//.test(image)
+      ? image
+      : `https://arweave.net/${image}`
+    : null;
+  if (!src || failed) {
+    return <div className="card-img placeholder">◈</div>;
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img className="card-img" src={src} alt={name} onError={() => setFailed(true)} />
+  );
+}
+
 function CardHeader({ card }: { card: Card }) {
   const buy = fromMicro(card.pricing?.buyPrice);
   const points = fromMicro(card.pointsValue);
   return (
     <div className="card-header">
-      {card.image && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={`https://arweave.net/${card.image}`} alt={card.name} />
-      )}
+      <CardImage image={card.image} name={card.name} />
       <div>
         <div className="name">{card.name}</div>
         <div className="meta">
@@ -365,15 +419,47 @@ function Verdict({ text }: { text: string }) {
   );
 }
 
-// Inline tokens: **bold**, `code`, [text](url).
-function inline(text: string, keyBase: string): React.ReactNode[] {
+// Other council members, keyed by the distinctive word in their name → color id.
+const MENTIONS: Record<string, string> = {
+  Quant: "quant",
+  Insider: "insider",
+  Contrarian: "contrarian",
+  Sharp: "sharp",
+  Newshound: "newshound",
+};
+const MENTION_RE = /\b(Quant|Insider|Contrarian|Sharp|Newshound)\b/g;
+
+// Wrap mentions of other pilots so you can see who is debating whom.
+function mentionize(text: string, keyBase: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  MENTION_RE.lastIndex = 0;
+  while ((m = MENTION_RE.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <span key={`${keyBase}-mn${i}`} className="mention" style={{ ["--xc" as string]: `var(--${MENTIONS[m[1]]})` }}>
+        {m[1]}
+      </span>
+    );
+    last = MENTION_RE.lastIndex;
+    i++;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+// Inline tokens: **bold**, `code`, [text](url), plus optional pilot mentions.
+function inline(text: string, keyBase: string, mentions = false): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const push = (s: string, k: string) => (mentions ? out.push(...mentionize(s, k)) : out.push(s));
   const re = /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
   while ((m = re.exec(text))) {
-    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m.index > last) push(text.slice(last, m.index), `${keyBase}-t${i}`);
     if (m[2] !== undefined) out.push(<strong key={`${keyBase}-${i}`}>{m[2]}</strong>);
     else if (m[3] !== undefined) out.push(<code key={`${keyBase}-${i}`}>{m[3]}</code>);
     else if (m[4] !== undefined)
@@ -385,7 +471,7 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
     last = re.lastIndex;
     i++;
   }
-  if (last < text.length) out.push(text.slice(last));
+  if (last < text.length) push(text.slice(last), `${keyBase}-tend`);
   return out;
 }
 
@@ -395,7 +481,7 @@ const cells = (l: string) =>
   l.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
 
 // Lightweight markdown: headings, bullets, tables, paragraphs + inline tokens.
-function Markdown({ source }: { source: string }) {
+function Markdown({ source, mentions = false }: { source: string; mentions?: boolean }) {
   const lines = source.split("\n");
   const blocks: React.ReactNode[] = [];
   let list: string[] = [];
@@ -406,7 +492,7 @@ function Markdown({ source }: { source: string }) {
     blocks.push(
       <ul key={k}>
         {list.map((li, i) => (
-          <li key={i}>{inline(li, `${k}-${i}`)}</li>
+          <li key={i}>{inline(li, `${k}-${i}`, mentions)}</li>
         ))}
       </ul>
     );
@@ -420,12 +506,12 @@ function Markdown({ source }: { source: string }) {
       <table key={k}>
         {head && (
           <thead>
-            <tr>{head.map((c, i) => <th key={i}>{inline(c, `${k}h${i}`)}</th>)}</tr>
+            <tr>{head.map((c, i) => <th key={i}>{inline(c, `${k}h${i}`, mentions)}</th>)}</tr>
           </thead>
         )}
         <tbody>
           {body.map((r, ri) => (
-            <tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c, `${k}${ri}-${ci}`)}</td>)}</tr>
+            <tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c, `${k}${ri}-${ci}`, mentions)}</td>)}</tr>
           ))}
         </tbody>
       </table>
@@ -443,7 +529,7 @@ function Markdown({ source }: { source: string }) {
     flushTable(`t${idx}`);
     if (/^#{1,6}\s/.test(line)) {
       flushList(`l${idx}`);
-      blocks.push(<h2 key={idx}>{inline(line.replace(/^#{1,6}\s/, ""), `h${idx}`)}</h2>);
+      blocks.push(<h2 key={idx}>{inline(line.replace(/^#{1,6}\s/, ""), `h${idx}`, mentions)}</h2>);
     } else if (/^\s*[-*]\s/.test(line)) {
       list.push(line.replace(/^\s*[-*]\s/, ""));
     } else if (/^\s*---+\s*$/.test(line)) {
@@ -452,7 +538,7 @@ function Markdown({ source }: { source: string }) {
       flushList(`l${idx}`);
     } else {
       flushList(`l${idx}`);
-      blocks.push(<p key={idx}>{inline(line, `p${idx}`)}</p>);
+      blocks.push(<p key={idx}>{inline(line, `p${idx}`, mentions)}</p>);
     }
   });
   flushList("lend");

@@ -53,10 +53,25 @@ const today = () => new Date().toISOString().slice(0, 10);
  * Returns the final assistant text. Uses the local Claude subscription;
  * WebSearch/WebFetch run headless (permissions bypassed for this trusted app).
  */
+interface QueryCallbacks {
+  onText: (text: string) => void;
+  onThink?: (text: string) => void;
+  onTool?: (tool: string, detail: string) => void;
+}
+
+/** Summarize a tool call's input into a short human label. */
+function toolDetail(name: string, input: unknown): string {
+  const i = (input ?? {}) as Record<string, unknown>;
+  if (name === "WebSearch") return String(i.query ?? "");
+  if (name === "WebFetch") return String(i.url ?? "");
+  const s = JSON.stringify(i);
+  return s.length > 80 ? s.slice(0, 80) + "…" : s;
+}
+
 async function runQuery(
   prompt: string,
   opts: { system: string; model: string; tools: string[]; maxTurns: number },
-  onText: (text: string) => void
+  cb: QueryCallbacks
 ): Promise<string> {
   const options: Options = {
     systemPrompt: opts.system,
@@ -77,11 +92,20 @@ async function runQuery(
     if (message.type === "stream_event") {
       const ev = message.event as {
         type: string;
-        delta?: { type?: string; text?: string };
+        delta?: { type?: string; text?: string; thinking?: string };
       };
       if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
         streamed += ev.delta.text;
-        onText(ev.delta.text);
+        cb.onText(ev.delta.text);
+      } else if (ev.type === "content_block_delta" && ev.delta?.type === "thinking_delta" && ev.delta.thinking) {
+        cb.onThink?.(ev.delta.thinking);
+      }
+    } else if (message.type === "assistant") {
+      // Surface tool use (web searches/fetches) as live activity.
+      for (const block of message.message.content) {
+        if (block.type === "tool_use") {
+          cb.onTool?.(block.name, toolDetail(block.name, block.input));
+        }
       }
     } else if (message.type === "result") {
       if (message.subtype === "success") finalText = message.result;
@@ -105,7 +129,11 @@ async function runExpert(
   const full = await runQuery(
     userPrompt,
     { system, model: EXPERT_MODEL, tools: ["WebSearch", "WebFetch"], maxTurns: 16 },
-    (text) => emit({ type: "delta", expertId: expert.id, round, text })
+    {
+      onText: (text) => emit({ type: "delta", expertId: expert.id, round, text }),
+      onThink: (text) => emit({ type: "think", expertId: expert.id, round, text }),
+      onTool: (tool, detail) => emit({ type: "tool", expertId: expert.id, round, tool, detail }),
+    }
   );
 
   emit({ type: "expert_done", expertId: expert.id, round });
@@ -165,7 +193,7 @@ disagreement is most informative. Be decisive but honest about uncertainty.\n\n$
   await runQuery(
     synthPrompt,
     { system: synthSystem, model: SYNTH_MODEL, tools: [], maxTurns: 2 },
-    (text) => emit({ type: "verdict_delta", text })
+    { onText: (text) => emit({ type: "verdict_delta", text }) }
   );
 
   emit({ type: "done" });

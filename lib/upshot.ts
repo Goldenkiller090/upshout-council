@@ -25,15 +25,21 @@ export function parseCardId(input: string): string | null {
 }
 
 async function getJson(url: string): Promise<unknown> {
-  const res = await fetch(url, {
-    headers: {
-      // Look like a browser; doesn't defeat Bunny Shield but avoids naive UA blocks.
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+  const headers: Record<string, string> = {
+    // Look like a browser; doesn't defeat Bunny Shield but avoids naive UA blocks.
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    Accept: "application/json",
+  };
+  // Replay your authenticated browser session so requests clear Bunny Shield
+  // (cookies) and pass auth (bearer). Grab both from your browser devtools.
+  if (process.env.UPSHOT_BEARER) {
+    const t = process.env.UPSHOT_BEARER.replace(/^Bearer\s+/i, "");
+    headers.Authorization = `Bearer ${t}`;
+  }
+  if (process.env.UPSHOT_COOKIE) headers.Cookie = process.env.UPSHOT_COOKIE;
+
+  const res = await fetch(url, { headers, cache: "no-store" });
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("text/html")) {
     throw new BunnyShieldError();
