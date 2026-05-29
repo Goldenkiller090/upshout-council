@@ -21,10 +21,13 @@ function readout(st?: ExpertState): { prob: number | null; lean: string | null }
   return { prob, lean };
 }
 
+type Phase = "idle" | "research" | "debate" | "verdict" | "done";
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [card, setCard] = useState<Card | null>(null);
   const [running, setRunning] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [pasteMode, setPasteMode] = useState(false);
@@ -38,6 +41,7 @@ export default function Home() {
     setVerdict("");
     setError("");
     setStatus("");
+    setPhase("research");
   }
 
   async function handleResolve() {
@@ -131,6 +135,9 @@ export default function Home() {
         break;
       case "status":
         setStatus(ev.message);
+        if (ev.phase === "research" || ev.phase === "debate" || ev.phase === "verdict") {
+          setPhase(ev.phase);
+        }
         break;
       case "expert_start":
         setExperts((prev) => ({
@@ -176,6 +183,7 @@ export default function Home() {
         break;
       case "done":
         setStatus("Verdict delivered.");
+        setPhase("done");
         break;
     }
   }
@@ -252,9 +260,11 @@ export default function Home() {
         </div>
       )}
 
-      {card && (
+      {card && phase !== "debate" && (
         <>
-          <div className="section-label">PILOT GRID · 05</div>
+          <div className="section-label">
+            PILOT GRID · 05{phase === "research" && " · RESEARCHING"}
+          </div>
           <div className="grid">
             {EXPERTS.map((e, i) => {
               const st = experts[e.id];
@@ -301,10 +311,13 @@ export default function Home() {
         </>
       )}
 
-      {card && Object.values(experts).some((e) => e.r2.text) && (
+      {card && (phase === "debate" || phase === "verdict" || phase === "done") && (
         <>
-          <div className="section-label">THE DEBATE FLOOR · WHO CHALLENGED WHOM</div>
-          <DebateArena experts={experts} />
+          <div className="section-label">
+            THE DEBATE FLOOR · WHO CHALLENGED WHOM
+            {phase === "debate" && <span className="live">● LIVE</span>}
+          </div>
+          <DebateArena experts={experts} live={phase === "debate"} />
         </>
       )}
 
@@ -394,13 +407,32 @@ function debateExchanges(experts: Record<string, ExpertState>): Exchange[] {
 
 const shortName = (id: string) => (EXPERTS.find((e) => e.id === id)?.name ?? id).replace("The ", "");
 
-function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
+const pairKey = (a: string, b: string) => [a, b].sort().join("|");
+
+function DebateArena({ experts, live }: { experts: Record<string, ExpertState>; live: boolean }) {
   const [hovered, setHovered] = useState<string | null>(null);
   const exchanges = debateExchanges(experts);
   const edges = Array.from(new Set(exchanges.map((x) => `${x.from}->${x.to}`))).map((k) => {
     const [from, to] = k.split("->");
     return { from, to };
   });
+
+  // A pair is a rebuttal when both directions exist (A challenged B and B challenged A).
+  const dirs = new Set(exchanges.map((x) => `${x.from}->${x.to}`));
+  const mutual = new Set<string>();
+  for (const x of exchanges) if (dirs.has(`${x.to}->${x.from}`)) mutual.add(pairKey(x.from, x.to));
+
+  // Group the feed by unordered pair so rebuttals render together.
+  const groups: { key: string; items: Exchange[] }[] = [];
+  const gIdx = new Map<string, number>();
+  for (const x of exchanges) {
+    const k = pairKey(x.from, x.to);
+    if (!gIdx.has(k)) {
+      gIdx.set(k, groups.length);
+      groups.push({ key: k, items: [] });
+    }
+    groups[gIdx.get(k)!].items.push(x);
+  }
 
   const W = 760, H = 420, cx = W / 2, cy = 196, R = 150, nodeR = 30;
   const N = EXPERTS.length;
@@ -436,15 +468,17 @@ function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
           const sa = pull(a, ctrl, nodeR + 2);
           const eb = pull(b, ctrl, nodeR + 8);
           const active = !hovered || hovered === from || hovered === to;
+          const isMutual = mutual.has(pairKey(from, to));
           return (
             <path
               key={i}
               d={`M ${sa.x} ${sa.y} Q ${ctrl.x} ${ctrl.y} ${eb.x} ${eb.y}`}
               fill="none"
               stroke={`var(--${from})`}
-              strokeWidth={hovered === from ? 2.4 : 1.6}
+              strokeWidth={hovered === from ? 2.8 : isMutual ? 2.2 : 1.5}
+              strokeDasharray={isMutual ? undefined : "5 4"}
               markerEnd={`url(#arw-${from})`}
-              opacity={active ? 0.85 : 0.12}
+              opacity={active ? (isMutual ? 0.95 : 0.7) : 0.1}
             />
           );
         })}
@@ -452,6 +486,7 @@ function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
         {EXPERTS.map((e, i) => {
           const p = pos[e.id];
           const { prob } = readout(experts[e.id]);
+          const speaking = live && experts[e.id]?.active;
           const dim = hovered && hovered !== e.id && !edges.some((g) => (g.from === hovered && g.to === e.id) || (g.to === hovered && g.from === e.id));
           return (
             <g
@@ -461,7 +496,8 @@ function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
               onMouseLeave={() => setHovered(null)}
               style={{ cursor: "pointer", opacity: dim ? 0.3 : 1 }}
             >
-              <circle r={nodeR} fill="#080a18" stroke={`var(--${e.id})`} strokeWidth={2} />
+              {speaking && <circle className="speaking" r={nodeR + 6} fill="none" stroke={`var(--${e.id})`} strokeWidth={1.5} />}
+              <circle r={nodeR} fill="#080a18" stroke={`var(--${e.id})`} strokeWidth={speaking ? 3 : 2} />
               <text textAnchor="middle" y={-2} className="node-name" fill={`var(--${e.id})`}>
                 {shortName(e.id).toUpperCase()}
               </text>
@@ -477,24 +513,47 @@ function DebateArena({ experts }: { experts: Record<string, ExpertState> }) {
       </svg>
 
       <div className="exchanges">
-        {exchanges.length === 0 ? (
-          <div className="exch-empty">Pilots are taking the floor…</div>
+        {groups.length === 0 ? (
+          <div className="exch-empty">
+            {live ? "Pilots are taking the floor…" : "No direct challenges surfaced."}
+          </div>
         ) : (
-          exchanges.map((x, i) => (
-            <div
-              className="exch"
-              key={i}
-              onMouseEnter={() => setHovered(x.from)}
-              onMouseLeave={() => setHovered(null)}
-            >
-              <div className="exch-head">
-                <span style={{ color: `var(--${x.from})` }}>{shortName(x.from)}</span>
-                <span className="arrow">▸ challenges ▸</span>
-                <span style={{ color: `var(--${x.to})` }}>{shortName(x.to)}</span>
+          groups.map((g, gi) => {
+            const isRebuttal = g.items.length > 1;
+            const [pa, pb] = g.key.split("|");
+            return (
+              <div
+                className={`exch${isRebuttal ? " rebuttal" : ""}`}
+                key={gi}
+                onMouseEnter={() => setHovered(g.items[0].from)}
+                onMouseLeave={() => setHovered(null)}
+              >
+                {isRebuttal ? (
+                  <div className="exch-head">
+                    <span style={{ color: `var(--${pa})` }}>{shortName(pa)}</span>
+                    <span className="arrow rb">⇄ rebuttal ⇄</span>
+                    <span style={{ color: `var(--${pb})` }}>{shortName(pb)}</span>
+                  </div>
+                ) : (
+                  <div className="exch-head">
+                    <span style={{ color: `var(--${g.items[0].from})` }}>{shortName(g.items[0].from)}</span>
+                    <span className="arrow">▸ challenges ▸</span>
+                    <span style={{ color: `var(--${g.items[0].to})` }}>{shortName(g.items[0].to)}</span>
+                  </div>
+                )}
+                {g.items.map((x, xi) => (
+                  <div className="exch-line" key={xi}>
+                    {isRebuttal && (
+                      <span className="who" style={{ color: `var(--${x.from})` }}>
+                        {shortName(x.from)}:
+                      </span>
+                    )}
+                    <span className="exch-body">“{x.text}”</span>
+                  </div>
+                ))}
               </div>
-              <div className="exch-body">“{x.text}”</div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>

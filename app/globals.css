@@ -714,10 +714,48 @@ textarea {
   font-size: 10px;
   text-transform: uppercase;
 }
+.exch-head .arrow.rb { color: var(--amber); }
+.exch.rebuttal {
+  border-left-color: var(--amber);
+  background: rgba(255, 212, 0, 0.05);
+}
+.exch-line {
+  display: flex;
+  gap: 7px;
+  margin-top: 5px;
+}
+.exch-line .who {
+  font-family: var(--display);
+  font-size: 10px;
+  flex: none;
+  padding-top: 2px;
+}
 .exch-body {
   font-size: 13px;
   color: #c4cfe6;
   line-height: 1.5;
+}
+
+/* LIVE badge + speaking pulse */
+.section-label .live {
+  color: var(--magenta);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  margin-left: 4px;
+  animation: blink 1.1s steps(2, start) infinite;
+}
+@keyframes blink { 50% { opacity: 0.3; } }
+.arena .speaking {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulse 1.3s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.9; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .section-label .live, .arena .speaking { animation: none; }
 }
 
 @media (max-width: 860px) {
