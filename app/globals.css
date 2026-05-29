@@ -532,11 +532,58 @@ textarea {
 
 .expert .body {
   font-size: 12.5px;
-  white-space: pre-wrap;
   color: #b9c6e0;
   line-height: 1.5;
   word-break: break-word;
 }
+
+/* compact markdown inside expert panels */
+.md-sm h2 {
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--xc);
+  margin: 10px 0 5px;
+}
+.md-sm p { margin: 0 0 7px; }
+.md-sm ul { margin: 2px 0 8px; padding-left: 16px; }
+.md-sm li { margin-bottom: 3px; }
+.md-sm li::marker { color: var(--xc); }
+.md-sm strong { color: #e7f1ff; font-weight: 600; }
+.md-sm code {
+  background: rgba(0, 240, 255, 0.08);
+  color: var(--cyan);
+  padding: 0 4px;
+  font-size: 11.5px;
+}
+.md-sm a { color: var(--xc); text-decoration: none; opacity: 0.8; }
+.md-sm a:hover { text-decoration: underline; opacity: 1; }
+
+.md-sm table,
+.verdict-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0 10px;
+  font-size: 11.5px;
+}
+.md-sm th,
+.md-sm td,
+.verdict-md th,
+.verdict-md td {
+  border: 1px solid var(--line);
+  padding: 3px 7px;
+  text-align: left;
+}
+.md-sm th,
+.verdict-md th {
+  color: var(--xc, var(--cyan));
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+}
+.verdict-md table { font-size: 13px; }
+.verdict-md th,
+.verdict-md td { padding: 5px 10px; }
 
 /* ---- Verdict / race result ---- */
 .verdict {
@@ -574,6 +621,14 @@ textarea {
 .verdict-md ul { margin: 4px 0 8px; padding-left: 18px; }
 .verdict-md li { font-size: 13.5px; color: #c8d6ee; margin-bottom: 4px; }
 .verdict-md li::marker { color: var(--magenta); }
+.verdict-md strong { color: #fff; font-weight: 700; }
+.verdict-md code {
+  background: rgba(255, 46, 151, 0.12);
+  color: var(--magenta);
+  padding: 0 5px;
+  font-size: 12.5px;
+}
+.verdict-md a { color: var(--cyan); }
 
 .hero {
   display: flex;

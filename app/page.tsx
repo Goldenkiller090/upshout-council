@@ -276,7 +276,9 @@ export default function Home() {
                       <div className="round-tag">
                         ROUND 1 · <b>RESEARCH</b>
                       </div>
-                      <div className="body">{st.round1}</div>
+                      <div className="body md-sm">
+                        <Markdown source={st.round1} />
+                      </div>
                     </>
                   )}
                   {st?.round2 && (
@@ -284,7 +286,9 @@ export default function Home() {
                       <div className="round-tag">
                         ROUND 2 · <b>DEBATE</b>
                       </div>
-                      <div className="body">{st.round2}</div>
+                      <div className="body md-sm">
+                        <Markdown source={st.round2} />
+                      </div>
                     </>
                   )}
                 </div>
@@ -333,41 +337,11 @@ function CardHeader({ card }: { card: Card }) {
   );
 }
 
-// Minimal markdown renderer for the verdict (## headings, - bullets, paragraphs)
-// plus a hero pull of the first probability percentage.
 function Verdict({ text }: { text: string }) {
-  const heroMatch = text.match(/(\d{1,3})\s*%/);
+  // Pull the number from the "Final probability" section if present; else first %.
+  const section = text.match(/final probability[^\n]*\n+[^\d]*?(\d{1,3})\s*%/i);
+  const heroMatch = section ?? text.match(/(\d{1,3})\s*%/);
   const hero = heroMatch ? heroMatch[1] : null;
-
-  const blocks: React.ReactNode[] = [];
-  let list: string[] = [];
-  const flush = (key: string) => {
-    if (list.length) {
-      blocks.push(
-        <ul key={key}>
-          {list.map((li, i) => (
-            <li key={i}>{li}</li>
-          ))}
-        </ul>
-      );
-      list = [];
-    }
-  };
-  text.split("\n").forEach((raw, idx) => {
-    const line = raw.trimEnd();
-    if (/^#{1,3}\s/.test(line)) {
-      flush(`u${idx}`);
-      blocks.push(<h2 key={idx}>{line.replace(/^#{1,3}\s/, "")}</h2>);
-    } else if (/^[-*]\s/.test(line)) {
-      list.push(line.replace(/^[-*]\s/, ""));
-    } else if (line.trim() === "") {
-      flush(`u${idx}`);
-    } else {
-      flush(`u${idx}`);
-      blocks.push(<p key={idx}>{line.replace(/\*\*/g, "")}</p>);
-    }
-  });
-  flush("uend");
 
   return (
     <div className="verdict">
@@ -384,7 +358,105 @@ function Verdict({ text }: { text: string }) {
           </div>
         </div>
       )}
-      <div className="verdict-md">{blocks}</div>
+      <div className="verdict-md">
+        <Markdown source={text} />
+      </div>
     </div>
   );
+}
+
+// Inline tokens: **bold**, `code`, [text](url).
+function inline(text: string, keyBase: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[2] !== undefined) out.push(<strong key={`${keyBase}-${i}`}>{m[2]}</strong>);
+    else if (m[3] !== undefined) out.push(<code key={`${keyBase}-${i}`}>{m[3]}</code>);
+    else if (m[4] !== undefined)
+      out.push(
+        <a key={`${keyBase}-${i}`} href={m[5]} target="_blank" rel="noopener noreferrer">
+          {m[4]}
+        </a>
+      );
+    last = re.lastIndex;
+    i++;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+const isTableRow = (l: string) => /\|/.test(l) && /\S/.test(l.replace(/\|/g, ""));
+const isTableSep = (l: string) => /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(l);
+const cells = (l: string) =>
+  l.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+
+// Lightweight markdown: headings, bullets, tables, paragraphs + inline tokens.
+function Markdown({ source }: { source: string }) {
+  const lines = source.split("\n");
+  const blocks: React.ReactNode[] = [];
+  let list: string[] = [];
+  let table: string[] = [];
+
+  const flushList = (k: string) => {
+    if (!list.length) return;
+    blocks.push(
+      <ul key={k}>
+        {list.map((li, i) => (
+          <li key={i}>{inline(li, `${k}-${i}`)}</li>
+        ))}
+      </ul>
+    );
+    list = [];
+  };
+  const flushTable = (k: string) => {
+    if (!table.length) return;
+    const rows = table.filter((l) => !isTableSep(l)).map(cells);
+    const [head, ...body] = rows;
+    blocks.push(
+      <table key={k}>
+        {head && (
+          <thead>
+            <tr>{head.map((c, i) => <th key={i}>{inline(c, `${k}h${i}`)}</th>)}</tr>
+          </thead>
+        )}
+        <tbody>
+          {body.map((r, ri) => (
+            <tr key={ri}>{r.map((c, ci) => <td key={ci}>{inline(c, `${k}${ri}-${ci}`)}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+    );
+    table = [];
+  };
+
+  lines.forEach((raw, idx) => {
+    const line = raw.trimEnd();
+    if (isTableRow(line)) {
+      flushList(`l${idx}`);
+      table.push(line);
+      return;
+    }
+    flushTable(`t${idx}`);
+    if (/^#{1,6}\s/.test(line)) {
+      flushList(`l${idx}`);
+      blocks.push(<h2 key={idx}>{inline(line.replace(/^#{1,6}\s/, ""), `h${idx}`)}</h2>);
+    } else if (/^\s*[-*]\s/.test(line)) {
+      list.push(line.replace(/^\s*[-*]\s/, ""));
+    } else if (/^\s*---+\s*$/.test(line)) {
+      flushList(`l${idx}`);
+    } else if (line.trim() === "") {
+      flushList(`l${idx}`);
+    } else {
+      flushList(`l${idx}`);
+      blocks.push(<p key={idx}>{inline(line, `p${idx}`)}</p>);
+    }
+  });
+  flushList("lend");
+  flushTable("tend");
+
+  return <>{blocks}</>;
 }
