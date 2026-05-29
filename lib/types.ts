@@ -1,0 +1,50 @@
+// Shared types for Upshout Council.
+
+/** A prediction card, normalized from the Upshot API response. */
+export interface Card {
+  id: string;
+  name: string;
+  rarity?: string;
+  maxSupply?: number;
+  pointsValue?: string;
+  image?: string;
+  outcomeId?: string;
+  event?: {
+    id?: string;
+    name?: string;
+    status?: string; // ACTIVE | RESOLVED
+    kind?: string; // SKILL | CASH | INSTANT
+    eventDate?: string;
+    pricePerCard?: string;
+    winningOutcomeId?: string | null;
+    resolvedAt?: string | null;
+  };
+  /** Marketplace quote, if we could fetch it. */
+  pricing?: {
+    currency?: string;
+    buyPrice?: string;
+    sellPrice?: string;
+    shopkeeperBalance?: string | number;
+    isTradeable?: boolean;
+  };
+}
+
+export interface Expert {
+  id: string;
+  name: string;
+  /** Short tag shown in the UI. */
+  bias: string;
+  /** System prompt establishing the persona. */
+  persona: string;
+}
+
+/** Server-Sent Event payloads streamed from /api/council. */
+export type CouncilEvent =
+  | { type: "status"; phase: string; message: string }
+  | { type: "card"; card: Card }
+  | { type: "expert_start"; expertId: string; name: string; bias: string; round: number }
+  | { type: "delta"; expertId: string; round: number; text: string }
+  | { type: "expert_done"; expertId: string; round: number }
+  | { type: "verdict_delta"; text: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
