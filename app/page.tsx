@@ -579,7 +579,17 @@ function CardImage({ image, name }: { image?: string; name: string }) {
 
 function CardHeader({ card }: { card: Card }) {
   const buy = fromMicro(card.pricing?.buyPrice);
+  // Show the reward on its actual rail: CASH cards pay in dollars (potentialPrize),
+  // not points, so "0 PTS" was hiding the real prize.
+  const rail = (card.prizeType ?? card.event?.kind ?? "").toUpperCase();
+  const cash = fromMicro(card.potentialPrize ?? card.prizeAmount);
   const points = fromMicro(card.pointsValue);
+  const reward =
+    rail === "CASH" && cash != null
+      ? `$${cash.toFixed(2)}`
+      : points != null
+        ? `${points} PTS`
+        : null;
   return (
     <div className="card-header">
       <CardImage image={card.image} name={card.name} />
@@ -592,7 +602,7 @@ function CardHeader({ card }: { card: Card }) {
           {card.event?.eventDate && (
             <span>· {new Date(card.event.eventDate).toLocaleDateString()}</span>
           )}
-          {points != null && <span>· {points} PTS</span>}
+          {reward && <span>· {reward}</span>}
           {buy != null && (
             <span>· BUY {buy} {card.pricing?.currency ?? "GOLD"}</span>
           )}
