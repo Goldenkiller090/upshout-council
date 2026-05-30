@@ -260,6 +260,8 @@ export default function Home() {
         </div>
       )}
 
+      {verdict && <Verdict text={verdict} />}
+
       {card && phase !== "debate" && (
         <>
           <div className="section-label">
@@ -320,8 +322,6 @@ export default function Home() {
           <DebateArena experts={experts} live={phase === "debate"} />
         </>
       )}
-
-      {verdict && <Verdict text={verdict} />}
 
       {card && (
         <div className="foot">

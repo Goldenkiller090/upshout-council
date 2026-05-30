@@ -15,6 +15,8 @@ export interface Card {
   potentialPrize?: string;
   /** Realized/locked payout, in micro-units (equals potential until resolution). */
   actualPrize?: string;
+  /** How many of maxSupply have been minted — if minted >= maxSupply, the mint is sold out. */
+  minted?: number;
   image?: string;
   outcomeId?: string;
   event?: {

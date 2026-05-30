@@ -100,6 +100,11 @@ export function normalizeCard(raw: Record<string, unknown>): Card {
     prizeAmount: d.prizeAmount as string | undefined,
     potentialPrize: d.potentialPrize as string | undefined,
     actualPrize: d.actualPrize as string | undefined,
+    minted: (() => {
+      const m = (d.supply as Record<string, unknown> | undefined)?.minted;
+      const n = m == null ? NaN : Number(m);
+      return Number.isNaN(n) ? undefined : n;
+    })(),
     image: d.image as string | undefined,
     outcomeId: d.outcomeId as string | undefined,
     event: event

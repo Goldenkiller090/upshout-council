@@ -15,6 +15,22 @@ function usd(value?: string | number): string | null {
   return n == null ? null : `$${n.toFixed(2)}`;
 }
 
+// Upshot has no SHOT/USD rate endpoint (even its own UI shows raw SHOT), so the
+// dollar value of a SHOT price can only be known if the operator supplies a rate.
+// Set UPSHOT_SHOT_USD (dollars per 1 SHOT) to let the council compute USD EV
+// directly; otherwise it computes the break-even SHOT price instead of guessing.
+const SHOT_USD = process.env.UPSHOT_SHOT_USD
+  ? Number(process.env.UPSHOT_SHOT_USD)
+  : null;
+
+/** Convert a display amount in a given currency to USD when we can. */
+function toUsd(amount: number, currency?: string): number | null {
+  const c = (currency ?? "").toUpperCase();
+  if (c === "CASH") return amount; // CASH is USD-pegged
+  if (c === "SHOT" && SHOT_USD != null && !Number.isNaN(SHOT_USD)) return amount * SHOT_USD;
+  return null;
+}
+
 /**
  * Describe what the card pays if it wins. Upshot has separate reward rails —
  * CASH (real money in `potentialPrize`), POINTS/GOLD (in `pointsValue`), and SHOT
@@ -54,8 +70,6 @@ function cardBrief(card: Card): string {
     if (e.status) lines.push(`Event status: ${e.status}`);
     if (e.kind) lines.push(`Event kind: ${e.kind}`);
     if (e.eventDate) lines.push(`Event date: ${e.eventDate}`);
-    const perCard = isCash ? usd(e.pricePerCard) : fromMicro(e.pricePerCard);
-    if (perCard != null) lines.push(`Mint price per card: ${isCash ? perCard : `${perCard} GOLD`}`);
     const pool = isCash ? usd(e.prizePool) : fromMicro(e.prizePool);
     if (pool != null) lines.push(`Event prize pool: ${isCash ? pool : `${pool} GOLD`}`);
     if (e.status === "RESOLVED") {
@@ -64,13 +78,32 @@ function cardBrief(card: Card): string {
       );
     }
   }
-  if (card.pricing) {
-    const buy = fromMicro(card.pricing.buyPrice);
-    const sell = fromMicro(card.pricing.sellPrice);
-    if (buy != null) lines.push(`Marketplace buy price: ${buy} ${card.pricing.currency ?? "GOLD"}`);
-    if (sell != null) lines.push(`Marketplace sell price: ${sell} ${card.pricing.currency ?? "GOLD"}`);
-    if (card.pricing.isTradeable != null) lines.push(`Tradeable: ${card.pricing.isTradeable}`);
+
+  // ---- Cost to acquire: anchor on the REAL price, not the (often sold-out) mint ----
+  const soldOut =
+    card.maxSupply != null && card.minted != null && card.minted >= card.maxSupply;
+  const mintNum = fromMicro(card.event?.pricePerCard);
+  const buy = fromMicro(card.pricing?.buyPrice);
+  const cur = card.pricing?.currency ?? "GOLD";
+  if (buy != null) {
+    const buyUsd = toUsd(buy, cur);
+    lines.push(
+      `Cost to BUY now (live secondary-market ask): ${buy} ${cur}${buyUsd != null ? ` (≈ $${buyUsd.toFixed(2)})` : ""}`
+    );
+    const sell = fromMicro(card.pricing?.sellPrice);
+    if (sell != null) lines.push(`Sell-back (bid): ${sell} ${cur}`);
   }
+  if (mintNum != null) {
+    const mintLabel = (card.prizeType ?? card.event?.kind ?? "").toUpperCase() === "CASH"
+      ? `$${mintNum.toFixed(2)}`
+      : `${mintNum} GOLD`;
+    lines.push(
+      soldOut
+        ? `Mint price was ${mintLabel}, but max supply (${card.maxSupply}) is fully minted — you CANNOT buy at mint. Judge value against the BUY price above, not the mint price.`
+        : `Mint price per card: ${mintLabel}`
+    );
+  }
+  if (card.pricing?.isTradeable != null) lines.push(`Tradeable: ${card.pricing.isTradeable}`);
   return lines.join("\n");
 }
 
@@ -79,7 +112,18 @@ outcome (e.g. "ETH closes above $4000"). If the predicted outcome happens, the c
 reward. Rewards come on different rails depending on the card: CASH (real money), POINTS/GOLD (in-app points),
 or a SHOT (a raffle/prize entry) — the brief states which rail and amount apply to this card.
 You are evaluating whether this card's predicted outcome will occur — i.e. the probability it WINS — and
-whether buying it at the current marketplace price is a good bet given that reward.`;
+whether buying it is a good bet given that reward.
+
+Judging value (BUY / HOLD / PASS):
+- Base your call on the ACTUAL price to acquire the card right now — the "Cost to BUY now" line — NOT the
+  mint price, which is frequently sold out and unobtainable.
+- The reward and the buy price are often in DIFFERENT currencies (e.g. reward in CASH/USD, price in SHOT).
+  A bet is +EV when  win_probability × reward  >  buy_price.  Convert to a common currency before comparing.
+- If the brief already shows the buy price converted to USD (≈ $X), compare directly against the USD reward.
+- If you are NOT given a USD value for the buy currency, DO NOT invent an exchange rate. Instead solve for the
+  break-even rate: the maximum the buy currency can be worth for the bet to stay +EV
+  (break_even_price_per_unit = win_probability × reward_usd ÷ buy_price_in_units), and frame your lean around it
+  — e.g. "BUY only if 1 SHOT is worth less than $0.0020; PASS if you value SHOT above that." State the assumption.`;
 
 const today = () => new Date().toISOString().slice(0, 10);
 
