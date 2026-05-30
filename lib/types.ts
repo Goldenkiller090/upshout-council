@@ -7,6 +7,14 @@ export interface Card {
   rarity?: string;
   maxSupply?: number;
   pointsValue?: string;
+  /** Reward rail: CASH | POINTS | GOLD | SHOT. Determines which prize field is live. */
+  prizeType?: string;
+  /** Cash/prize amount in micro-units (only meaningful for non-points rails). */
+  prizeAmount?: string;
+  /** Current potential payout if this card wins, in micro-units. */
+  potentialPrize?: string;
+  /** Realized/locked payout, in micro-units (equals potential until resolution). */
+  actualPrize?: string;
   image?: string;
   outcomeId?: string;
   event?: {
@@ -16,6 +24,8 @@ export interface Card {
     kind?: string; // SKILL | CASH | INSTANT
     eventDate?: string;
     pricePerCard?: string;
+    /** Total event prize pool, in micro-units. */
+    prizePool?: string;
     winningOutcomeId?: string | null;
     resolvedAt?: string | null;
   };

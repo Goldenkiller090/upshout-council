@@ -9,22 +9,55 @@ const SYNTH_MODEL = "opus";
 
 type Emit = (event: CouncilEvent) => void;
 
+/** Format micro-units as a USD amount, e.g. 732920721 -> "$732.92". */
+function usd(value?: string | number): string | null {
+  const n = fromMicro(value);
+  return n == null ? null : `$${n.toFixed(2)}`;
+}
+
+/**
+ * Describe what the card pays if it wins. Upshot has separate reward rails —
+ * CASH (real money in `potentialPrize`), POINTS/GOLD (in `pointsValue`), and SHOT
+ * (a raffle/prize entry). A CASH card legitimately has pointsValue 0 and vice
+ * versa, so we must read the right field for the rail or the brief understates it.
+ */
+function formatReward(card: Card): string {
+  const rail = (card.prizeType ?? card.event?.kind ?? "").toUpperCase();
+  const cash = usd(card.potentialPrize ?? card.prizeAmount);
+  const points = fromMicro(card.pointsValue);
+
+  if (rail === "CASH") {
+    return `Reward if it wins: CASH — ${cash ?? "$0.00"} cash payout (this is a cash card; points are 0 by design)`;
+  }
+  if (rail === "SHOT") {
+    return `Reward if it wins: a SHOT (raffle/prize entry)${cash ? `, prize ${cash}` : ""}`;
+  }
+  if (points != null && points > 0) {
+    return `Reward if it wins: ${points} ${rail === "GOLD" ? "GOLD" : "points"}`;
+  }
+  // Unknown rail — surface whatever is non-zero rather than defaulting to points.
+  if (cash && cash !== "$0.00") return `Reward if it wins: ${cash} (${rail || "prize"})`;
+  return `Reward if it wins: ${points ?? 0} points`;
+}
+
 /** Build a compact, factual brief about the card for every expert to share. */
 function cardBrief(card: Card): string {
   const lines: string[] = [];
   lines.push(`Card: "${card.name}"`);
   if (card.rarity) lines.push(`Rarity: ${card.rarity}`);
   if (card.maxSupply != null) lines.push(`Max supply: ${card.maxSupply}`);
-  const points = fromMicro(card.pointsValue);
-  if (points != null) lines.push(`Points value if it wins: ${points}`);
+  lines.push(formatReward(card));
   if (card.event) {
     const e = card.event;
+    const isCash = (card.prizeType ?? e.kind ?? "").toUpperCase() === "CASH";
     if (e.name) lines.push(`Event: ${e.name}`);
     if (e.status) lines.push(`Event status: ${e.status}`);
     if (e.kind) lines.push(`Event kind: ${e.kind}`);
     if (e.eventDate) lines.push(`Event date: ${e.eventDate}`);
-    const perCard = fromMicro(e.pricePerCard);
-    if (perCard != null) lines.push(`Mint price per card: ${perCard} GOLD`);
+    const perCard = isCash ? usd(e.pricePerCard) : fromMicro(e.pricePerCard);
+    if (perCard != null) lines.push(`Mint price per card: ${isCash ? perCard : `${perCard} GOLD`}`);
+    const pool = isCash ? usd(e.prizePool) : fromMicro(e.prizePool);
+    if (pool != null) lines.push(`Event prize pool: ${isCash ? pool : `${pool} GOLD`}`);
     if (e.status === "RESOLVED") {
       lines.push(
         `ALREADY RESOLVED — winning outcome: ${e.winningOutcomeId ?? "n/a"}, this card's outcome: ${card.outcomeId ?? "n/a"}`
@@ -42,9 +75,11 @@ function cardBrief(card: Card): string {
 }
 
 const SHARED_CONTEXT = `Upshot Cards is a prediction-market platform: a "card" represents a specific
-outcome (e.g. "ETH closes above $4000"). If the predicted outcome happens, the card "wins" and pays out points.
+outcome (e.g. "ETH closes above $4000"). If the predicted outcome happens, the card "wins" and pays out a
+reward. Rewards come on different rails depending on the card: CASH (real money), POINTS/GOLD (in-app points),
+or a SHOT (a raffle/prize entry) — the brief states which rail and amount apply to this card.
 You are evaluating whether this card's predicted outcome will occur — i.e. the probability it WINS — and
-whether buying it at the current marketplace price is a good bet.`;
+whether buying it at the current marketplace price is a good bet given that reward.`;
 
 const today = () => new Date().toISOString().slice(0, 10);
 

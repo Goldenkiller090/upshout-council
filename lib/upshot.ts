@@ -94,6 +94,12 @@ export function normalizeCard(raw: Record<string, unknown>): Card {
     rarity: d.rarity as string | undefined,
     maxSupply: d.maxSupply as number | undefined,
     pointsValue: d.pointsValue as string | undefined,
+    // Reward rail + cash prize. `kind`/`prizeType` tell us which rail is live;
+    // a CASH card carries its value in potentialPrize, not pointsValue.
+    prizeType: (d.prizeType ?? d.kind) as string | undefined,
+    prizeAmount: d.prizeAmount as string | undefined,
+    potentialPrize: d.potentialPrize as string | undefined,
+    actualPrize: d.actualPrize as string | undefined,
     image: d.image as string | undefined,
     outcomeId: d.outcomeId as string | undefined,
     event: event
@@ -104,6 +110,7 @@ export function normalizeCard(raw: Record<string, unknown>): Card {
           kind: event.kind as string | undefined,
           eventDate: event.eventDate as string | undefined,
           pricePerCard: event.pricePerCard as string | undefined,
+          prizePool: event.prizePool as string | undefined,
           winningOutcomeId: (event.winningOutcomeId as string | null) ?? null,
           resolvedAt: (event.resolvedAt as string | null) ?? null,
         }
