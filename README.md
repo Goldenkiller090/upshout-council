@@ -17,12 +17,18 @@ WipEout '95 HUD.
 - **Paste links** — one or many card IDs / `upshot.cards` URLs (one per line). Each becomes
   its own council run.
 - **From wallet** — enter a wallet address or `upshot.cards/profile/0x…` URL to load every
-  card that profile owns, then search/filter and multi-select which to predict. Only cards
-  still **open to predict** (not resolved, not past their event date) are shown.
+  card that profile owns, then **search and filter** (by prize currency you can win —
+  CASH / GOLD / SHOT — and by rarity) and multi-select which to predict. Only cards still
+  **open to predict** (not resolved, not past their event date) are shown.
 
 Selected cards run as **parallel councils** — up to **3 at once** (they share your single
-subscription), the rest queue automatically. Each card gets its own independent panel, so
-runs never interrupt or bleed into each other.
+subscription), the rest queue automatically. Each card gets its own independent panel with
+its own **Stop** button, so runs never interrupt or bleed into each other. Stop aborts the
+stream end-to-end (client → server → every agent), so it actually stops spending your plan.
+
+After the verdict, a **reconciliation** note flags when the synthesizer's headline
+probability lands outside where the four pilots actually landed — a cue to read *The split*
+before trusting the number.
 
 ## How it works
 
@@ -31,14 +37,14 @@ runs never interrupt or bleed into each other.
    blocks the request (HTML challenge), the UI falls back to pasting the card JSON
    (`POST /api/card`).
 2. **Convene the council** — `POST /api/council` streams the deliberation over SSE:
-   - **Round 1** — the five experts research independently (parallel, web search).
+   - **Round 1** — the four experts research independently (parallel, web search).
    - **Round 2** — each rebuts the others after seeing their takes.
    - **Synthesis** — a final verdict weighs the arguments into one probability + call.
 
 The orchestration (`lib/council.ts`) is provider-agnostic: it asks `lib/llm` to run each
 turn, and `lib/llm` dispatches to whichever backend you selected.
 
-### The five pilots (`lib/experts.ts`)
+### The four pilots (`lib/experts.ts`)
 
 | Pilot          | Bias                  |
 | -------------- | --------------------- |
@@ -46,7 +52,8 @@ turn, and `lib/llm` dispatches to whichever backend you selected.
 | The Insider    | Domain expertise      |
 | The Contrarian | Fade the consensus    |
 | The Sharp      | Market & odds reader  |
-| The Newshound  | Breaking news/recency |
+
+(Recency is a cross-cutting instruction every pilot follows, rather than a dedicated seat.)
 
 Experts run on the faster model (Sonnet / `gpt-5-codex`); the synthesizer on the strongest
 (Opus / `gpt-5-codex`). Both via your subscription — see below.
@@ -163,6 +170,8 @@ Restart `npm run dev` after changing `.env.local`.
 | `UPSHOT_SHOT_USD` | — | dollars per 1 SHOT (for USD EV; see below) |
 | `UPSHOT_BEARER` | — | replay browser auth for server-side card fetch |
 | `UPSHOT_COOKIE` | — | Bunny Shield cookies (the part that clears the shield) |
+| `COUNCIL_EXPERT_TIMEOUT_MS` | `210000` | abort a hung expert turn (keeps partial output) |
+| `COUNCIL_SYNTH_TIMEOUT_MS` | `180000` | abort a hung synthesis turn |
 
 ### Pricing & expected value
 
@@ -201,7 +210,7 @@ lib/
     claude.ts           # Claude Agent SDK runner (Claude sub)
     codex.ts            # Codex SDK runner (ChatGPT sub)
     types.ts            # shared RunRequest / callbacks contract
-  experts.ts            # the five personas
+  experts.ts            # the four personas
   upshot.ts             # Upshot client + Bunny Shield detection
   types.ts
 upshot-api/             # cloned API docs (reference)
