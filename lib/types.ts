@@ -62,5 +62,13 @@ export type CouncilEvent =
   | { type: "tool"; expertId: string; round: number; tool: string; detail: string }
   | { type: "expert_done"; expertId: string; round: number }
   | { type: "verdict_delta"; text: string }
+  | {
+      type: "reconcile";
+      min: number;
+      max: number;
+      median: number;
+      headline: number | null;
+      divergent: boolean;
+    }
   | { type: "done" }
   | { type: "error"; message: string };

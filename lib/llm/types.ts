@@ -20,6 +20,8 @@ export interface RunRequest {
   webSearch: boolean;
   /** Soft cap on agent turns (Claude honours this; Codex manages its own). */
   maxTurns: number;
+  /** Abort the turn (e.g. a per-expert timeout) so one hung agent can't stall the batch. */
+  signal?: AbortSignal;
 }
 
 export interface RunCallbacks {

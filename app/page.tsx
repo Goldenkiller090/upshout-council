@@ -351,6 +351,13 @@ function CouncilRun({
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState("Queued…");
   const [error, setError] = useState("");
+  const [recon, setRecon] = useState<{
+    min: number;
+    max: number;
+    median: number;
+    headline: number | null;
+    divergent: boolean;
+  } | null>(null);
   const started = useRef(false);
 
   useEffect(() => {
@@ -399,6 +406,15 @@ function CouncilRun({
           break;
         case "verdict_delta":
           setVerdict((v) => v + ev.text);
+          break;
+        case "reconcile":
+          setRecon({
+            min: ev.min,
+            max: ev.max,
+            median: ev.median,
+            headline: ev.headline,
+            divergent: ev.divergent,
+          });
           break;
         case "error":
           setError(ev.message);
@@ -462,6 +478,15 @@ function CouncilRun({
 
       {error && <div className="error">{error}</div>}
       {verdict && <Verdict text={verdict} />}
+
+      {recon && (
+        <div className={`recon ${recon.divergent ? "warn" : "ok"}`}>
+          {recon.divergent ? "⚠ HEADLINE DIVERGES" : "✓ HEADLINE IN RANGE"} ·{" "}
+          {recon.headline != null ? `${recon.headline}%` : "—"} vs pilots {recon.min}–{recon.max}%
+          (median {recon.median}%)
+          {recon.divergent && " — the chair's number sits outside where the pilots landed; read 'The split' before trusting it."}
+        </div>
+      )}
 
       {phase !== "idle" && phase !== "debate" && (
         <>

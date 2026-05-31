@@ -2,7 +2,11 @@ import type { Card, CouncilEvent, Expert } from "./types";
 import { EXPERTS } from "./experts";
 import { fromMicro } from "./upshot";
 import { runAgent, providerLabel } from "./llm";
-import { extractCall } from "./parse";
+import { extractCall, extractVerdictProb } from "./parse";
+
+// Per-turn timeouts so one hung agent can't stall the batch (overridable via env).
+const EXPERT_TIMEOUT_MS = Number(process.env.COUNCIL_EXPERT_TIMEOUT_MS ?? 210_000);
+const SYNTH_TIMEOUT_MS = Number(process.env.COUNCIL_SYNTH_TIMEOUT_MS ?? 180_000);
 
 /** One-line, token-cheap digest of a round-1 take for feeding to others/the synth. */
 function digest(expert: Expert, text: string): string {
@@ -173,17 +177,41 @@ async function runExpert(
 
   const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use web search to research current facts BEFORE you commit to a number — weight the most recent information heavily and stamp the date of time-sensitive facts (a settled or stale fact must not be treated as a live forecast). Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
 
-  const full = await runAgent(
-    { role: "expert", system, prompt: userPrompt, webSearch: true, maxTurns: 16 },
-    {
-      onText: (text) => emit({ type: "delta", expertId: expert.id, round, text }),
-      onThink: (text) => emit({ type: "think", expertId: expert.id, round, text }),
-      onTool: (tool, detail) => emit({ type: "tool", expertId: expert.id, round, tool, detail }),
+  // Per-expert timeout: abort a hung turn but keep whatever it streamed so the
+  // debate and synthesis still have signal from it.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXPERT_TIMEOUT_MS);
+  let acc = "";
+  let full = "";
+  try {
+    full = await runAgent(
+      { role: "expert", system, prompt: userPrompt, webSearch: true, maxTurns: 16, signal: controller.signal },
+      {
+        onText: (text) => {
+          acc += text;
+          emit({ type: "delta", expertId: expert.id, round, text });
+        },
+        onThink: (text) => emit({ type: "think", expertId: expert.id, round, text }),
+        onTool: (tool, detail) => emit({ type: "tool", expertId: expert.id, round, tool, detail }),
+      }
+    );
+  } catch {
+    // Timed out or errored mid-stream — fall through with the partial text.
+    if (controller.signal.aborted) {
+      emit({
+        type: "tool",
+        expertId: expert.id,
+        round,
+        tool: "timeout",
+        detail: `cut off after ${Math.round(EXPERT_TIMEOUT_MS / 1000)}s`,
+      });
     }
-  );
+  } finally {
+    clearTimeout(timer);
+  }
 
   emit({ type: "expert_done", expertId: expert.id, round });
-  return full;
+  return (full || acc).trim();
 }
 
 /**
@@ -241,10 +269,49 @@ and where the disagreement is most informative. Be decisive but honest about unc
 
   const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the four pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
 
-  await runAgent(
-    { role: "synth", system: synthSystem, prompt: synthPrompt, webSearch: false, maxTurns: 2 },
-    { onText: (text) => emit({ type: "verdict_delta", text }) }
+  const synthController = new AbortController();
+  const synthTimer = setTimeout(() => synthController.abort(), SYNTH_TIMEOUT_MS);
+  let verdictText = "";
+  try {
+    await runAgent(
+      {
+        role: "synth",
+        system: synthSystem,
+        prompt: synthPrompt,
+        webSearch: false,
+        maxTurns: 2,
+        signal: synthController.signal,
+      },
+      {
+        onText: (text) => {
+          verdictText += text;
+          emit({ type: "verdict_delta", text });
+        },
+      }
+    );
+  } catch {
+    // Partial verdict already streamed; continue to reconciliation.
+  } finally {
+    clearTimeout(synthTimer);
+  }
+
+  // ---- Reconcile the headline against the pilots (audit #5) ----
+  const pilotProbs = EXPERTS.map((_, i) => extractCall(`${round1[i]}\n${round2[i]}`).prob).filter(
+    (p): p is number => p != null
   );
+  if (pilotProbs.length) {
+    const sorted = [...pilotProbs].sort((a, b) => a - b);
+    const min = sorted[0];
+    const max = sorted[sorted.length - 1];
+    const mid = sorted.length % 2
+      ? sorted[(sorted.length - 1) / 2]
+      : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2);
+    const headline = extractVerdictProb(verdictText);
+    // Divergent if the headline lands outside the pilots' range or >15pts off the median.
+    const divergent =
+      headline != null && (headline < min || headline > max || Math.abs(headline - mid) > 15);
+    emit({ type: "reconcile", min, max, median: mid, headline, divergent });
+  }
 
   emit({ type: "done" });
 }

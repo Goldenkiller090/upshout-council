@@ -74,7 +74,7 @@ export async function runCodex(req: RunRequest, cb: RunCallbacks): Promise<strin
     }
   };
 
-  const { events } = await thread.runStreamed(prompt);
+  const { events } = await thread.runStreamed(prompt, { signal: req.signal });
   for await (const ev of events) {
     if (ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed") {
       handle(ev.item);

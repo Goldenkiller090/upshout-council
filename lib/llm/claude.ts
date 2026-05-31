@@ -23,6 +23,13 @@ function toolDetail(name: string, input: unknown): string {
  * (permissions bypassed for this trusted local app).
  */
 export async function runClaude(req: RunRequest, cb: RunCallbacks): Promise<string> {
+  // Bridge the request's AbortSignal to the SDK's AbortController.
+  const ac = new AbortController();
+  if (req.signal) {
+    if (req.signal.aborted) ac.abort();
+    else req.signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
+
   const options: Options = {
     systemPrompt: req.system,
     model: model(req.role),
@@ -31,6 +38,7 @@ export async function runClaude(req: RunRequest, cb: RunCallbacks): Promise<stri
     maxTurns: req.maxTurns,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
+    abortController: ac,
     // Don't inherit the user's CLAUDE.md / settings — keep runs isolated.
     settingSources: [],
   };
