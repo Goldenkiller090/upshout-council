@@ -17,24 +17,42 @@ export async function POST(req: NextRequest) {
   }
 
   const encoder = new TextEncoder();
+  // Abort the whole deliberation when the client disconnects / hits Stop, so we
+  // stop spending the subscription the moment nobody is listening.
+  const ac = new AbortController();
+  req.signal.addEventListener("abort", () => ac.abort());
 
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       const emit = (event: CouncilEvent) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
       };
 
       // Echo the card so the UI can render its header immediately.
       emit({ type: "card", card });
 
       try {
-        await runCouncil(card, emit);
+        await runCouncil(card, emit, ac.signal);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Council failed";
-        emit({ type: "error", message });
+        if (!ac.signal.aborted) emit({ type: "error", message });
       } finally {
-        controller.close();
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
       }
+    },
+    cancel() {
+      ac.abort();
     },
   });
 

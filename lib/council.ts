@@ -171,7 +171,8 @@ async function runExpert(
   expert: Expert,
   userPrompt: string,
   round: number,
-  emit: Emit
+  emit: Emit,
+  outerSignal?: AbortSignal
 ): Promise<string> {
   emit({ type: "expert_start", expertId: expert.id, name: expert.name, bias: expert.bias, round });
 
@@ -181,6 +182,11 @@ async function runExpert(
   // debate and synthesis still have signal from it.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EXPERT_TIMEOUT_MS);
+  // Fold the run-wide signal (client Stop / disconnect) into this turn's controller.
+  if (outerSignal) {
+    if (outerSignal.aborted) controller.abort();
+    else outerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
   let acc = "";
   let full = "";
   try {
@@ -220,7 +226,7 @@ async function runExpert(
  *   Round 2 — each expert rebuts the others after seeing all takes (parallel)
  *   Synthesis — Opus weighs everything into a final verdict (streamed)
  */
-export async function runCouncil(card: Card, emit: Emit): Promise<void> {
+export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): Promise<void> {
   const brief = cardBrief(card);
 
   // ---- Round 1: independent research ----
@@ -233,7 +239,7 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
   const round1Prompt = `Here is the card under review:\n\n${brief}\n\nResearch this outcome and give your independent assessment. End your response with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
   const round1 = await Promise.all(
-    EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit))
+    EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit, signal))
   );
 
   // ---- Round 2: rebuttal / deliberation ----
@@ -248,7 +254,7 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
 
       const prompt = `The card under review:\n\n${brief}\n\nHere are the other council members' first-round takes (digested):\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Research further if needed. Then give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
-      return runExpert(e, prompt, 2, emit);
+      return runExpert(e, prompt, 2, emit, signal);
     })
   );
 
@@ -271,6 +277,10 @@ and where the disagreement is most informative. Be decisive but honest about unc
 
   const synthController = new AbortController();
   const synthTimer = setTimeout(() => synthController.abort(), SYNTH_TIMEOUT_MS);
+  if (signal) {
+    if (signal.aborted) synthController.abort();
+    else signal.addEventListener("abort", () => synthController.abort(), { once: true });
+  }
   let verdictText = "";
   try {
     await runAgent(

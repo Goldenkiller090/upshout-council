@@ -34,6 +34,8 @@ export default function Home() {
   const [picker, setPicker] = useState<Card[] | null>(null);
   const [pickerMeta, setPickerMeta] = useState<{ total: number; shown: number } | null>(null);
   const [search, setSearch] = useState("");
+  const [prizeFilter, setPrizeFilter] = useState(""); // prize rail you can win
+  const [rarityFilter, setRarityFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   // the batch actually running, + which runs have finished (for the scheduler)
@@ -149,14 +151,29 @@ export default function Home() {
     }
   }
 
+  const prizeOf = (c: Card) => (c.prizeType ?? c.event?.kind ?? "").toUpperCase();
+  const rarityOf = (c: Card) => (c.rarity ?? "").toUpperCase();
+
+  const prizeOpts = useMemo(
+    () => Array.from(new Set((picker ?? []).map(prizeOf).filter(Boolean))).sort(),
+    [picker]
+  );
+  const rarityOpts = useMemo(
+    () => Array.from(new Set((picker ?? []).map(rarityOf).filter(Boolean))).sort(),
+    [picker]
+  );
+
   const filtered = useMemo(() => {
     if (!picker) return [];
     const q = search.trim().toLowerCase();
-    if (!q) return picker;
-    return picker.filter((c) =>
-      `${c.name} ${c.event?.name ?? ""} ${c.rarity ?? ""}`.toLowerCase().includes(q)
-    );
-  }, [picker, search]);
+    return picker.filter((c) => {
+      if (q && !`${c.name} ${c.event?.name ?? ""} ${c.rarity ?? ""}`.toLowerCase().includes(q))
+        return false;
+      if (prizeFilter && prizeOf(c) !== prizeFilter) return false;
+      if (rarityFilter && rarityOf(c) !== rarityFilter) return false;
+      return true;
+    });
+  }, [picker, search, prizeFilter, rarityFilter]);
 
   function toggle(id: string) {
     setSelected((p) => {
@@ -267,12 +284,36 @@ export default function Home() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+            <select
+              className="picker-filter"
+              value={prizeFilter}
+              onChange={(e) => setPrizeFilter(e.target.value)}
+            >
+              <option value="">ALL PRIZES</option>
+              {prizeOpts.map((o) => (
+                <option key={o} value={o}>
+                  WIN: {o}
+                </option>
+              ))}
+            </select>
+            <select
+              className="picker-filter"
+              value={rarityFilter}
+              onChange={(e) => setRarityFilter(e.target.value)}
+            >
+              <option value="">ALL RARITIES</option>
+              {rarityOpts.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
             <span className="picker-meta">
               {pickerMeta ? `${pickerMeta.shown} open · ${pickerMeta.total} owned` : ""}
-              {search ? ` · ${filtered.length} match` : ""}
+              {search || prizeFilter || rarityFilter ? ` · ${filtered.length} match` : ""}
             </span>
             <button className="ghost" onClick={() => setSelected(new Set(filtered.map((c) => c.id)))}>
-              SELECT ALL{search ? " (FILTERED)" : ""}
+              SELECT ALL{search || prizeFilter || rarityFilter ? " (FILTERED)" : ""}
             </button>
             <button className="ghost" onClick={() => setSelected(new Set())}>
               CLEAR
@@ -358,10 +399,20 @@ function CouncilRun({
     headline: number | null;
     divergent: boolean;
   } | null>(null);
+  const [stopped, setStopped] = useState(false);
   const started = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  function stop() {
+    abortRef.current?.abort();
+    setStopped(true);
+    setStatus("Stopped.");
+    setPhase("done");
+    onDone(initialCard.id);
+  }
 
   useEffect(() => {
-    if (!active || started.current) return;
+    if (!active || started.current || stopped) return;
     started.current = true;
 
     const apply = (ev: CouncilEvent) => {
@@ -426,6 +477,9 @@ function CouncilRun({
       }
     };
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     (async () => {
       setPhase("research");
       setStatus("Convening the council…");
@@ -434,6 +488,7 @@ function CouncilRun({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ card: initialCard }),
+          signal: controller.signal,
         });
         if (!res.ok || !res.body) {
           setError("Failed to start the council.");
@@ -456,7 +511,8 @@ function CouncilRun({
           }
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Stream error.");
+        // Swallow the abort that Stop / unmount triggers; surface real errors.
+        if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Stream error.");
       } finally {
         onDone(initialCard.id);
       }
@@ -472,8 +528,13 @@ function CouncilRun({
       <CardHeader card={card} />
 
       <div className="status">
-        {running && <span className="spinner" />}
-        {queued ? "Queued — waiting for a free slot…" : status}
+        {running && !stopped && <span className="spinner" />}
+        <span>{queued ? "Queued — waiting for a free slot…" : status}</span>
+        {!stopped && (running || queued) && (
+          <button className="stop" onClick={stop}>
+            ◼ STOP
+          </button>
+        )}
       </div>
 
       {error && <div className="error">{error}</div>}
