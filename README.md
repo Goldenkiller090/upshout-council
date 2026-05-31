@@ -12,11 +12,24 @@ WipEout '95 HUD.
 
 ---
 
+## Pick cards two ways
+
+- **Paste links** — one or many card IDs / `upshot.cards` URLs (one per line). Each becomes
+  its own council run.
+- **From wallet** — enter a wallet address or `upshot.cards/profile/0x…` URL to load every
+  card that profile owns, then search/filter and multi-select which to predict. Only cards
+  still **open to predict** (not resolved, not past their event date) are shown.
+
+Selected cards run as **parallel councils** — up to **3 at once** (they share your single
+subscription), the rest queue automatically. Each card gets its own independent panel, so
+runs never interrupt or bleed into each other.
+
 ## How it works
 
 1. **Resolve the card** — `GET /api/card?input=<id-or-url>` fetches it from the Upshot API
-   server-side. If Bunny Shield blocks the request (HTML challenge), the UI falls back to
-   pasting the card JSON (`POST /api/card`).
+   server-side (or `GET /api/cards?wallet=<addr>` for a whole profile). If Bunny Shield
+   blocks the request (HTML challenge), the UI falls back to pasting the card JSON
+   (`POST /api/card`).
 2. **Convene the council** — `POST /api/council` streams the deliberation over SSE:
    - **Round 1** — the five experts research independently (parallel, web search).
    - **Round 2** — each rebuts the others after seeing their takes.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Card, CouncilEvent } from "@/lib/types";
 import { EXPERTS } from "@/lib/experts";
 import { fromMicro } from "@/lib/upshot";
@@ -19,49 +19,88 @@ function readout(st?: ExpertState): { prob: number | null; lean: string | null }
 
 type Phase = "idle" | "research" | "debate" | "verdict" | "done";
 
+const CONCURRENCY = 3; // councils streaming at once (shared single subscription)
+
 export default function Home() {
-  const [input, setInput] = useState("");
-  const [card, setCard] = useState<Card | null>(null);
-  const [running, setRunning] = useState(false);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [status, setStatus] = useState("");
+  const [mode, setMode] = useState<"link" | "wallet">("link");
+  const [input, setInput] = useState(""); // one or many IDs/URLs (newline/comma separated)
+  const [wallet, setWallet] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pasteMode, setPasteMode] = useState(false);
   const [pasteValue, setPasteValue] = useState("");
-  const [experts, setExperts] = useState<Record<string, ExpertState>>({});
-  const [verdict, setVerdict] = useState("");
-  const fetching = useRef(false);
 
-  function resetRun() {
-    setExperts(Object.fromEntries(EXPERTS.map((e) => [e.id, emptyExpert()])));
-    setVerdict("");
-    setError("");
-    setStatus("");
-    setPhase("research");
+  // wallet picker
+  const [picker, setPicker] = useState<Card[] | null>(null);
+  const [pickerMeta, setPickerMeta] = useState<{ total: number; shown: number } | null>(null);
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // the batch actually running, + which runs have finished (for the scheduler)
+  const [runs, setRuns] = useState<Card[]>([]);
+  const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
+
+  const markDone = useCallback(
+    (id: string) => setDoneIds((p) => new Set(p).add(id)),
+    []
+  );
+
+  function startBatch(cards: Card[]) {
+    const seen = new Set<string>();
+    const uniq = cards.filter((c) => c.id && !seen.has(c.id) && seen.add(c.id));
+    if (!uniq.length) return;
+    setDoneIds(new Set());
+    setRuns(uniq);
   }
 
-  async function handleResolve() {
-    if (!input.trim() || fetching.current) return;
-    fetching.current = true;
+  function resetBatch() {
+    setRuns([]);
+    setDoneIds(new Set());
+    setError("");
+  }
+
+  // A run is active (allowed to stream) if fewer than CONCURRENCY not-done runs precede it.
+  const activeFor = (i: number) => {
+    let notDoneBefore = 0;
+    for (let j = 0; j < i; j++) if (!doneIds.has(runs[j].id)) notDoneBefore++;
+    return notDoneBefore < CONCURRENCY;
+  };
+
+  // ---- Link mode: resolve one OR many IDs/URLs into cards, then batch them. ----
+  async function resolveOne(token: string): Promise<{ card?: Card; error?: string }> {
+    try {
+      const res = await fetch(`/api/card?input=${encodeURIComponent(token)}`);
+      const data = await res.json();
+      if (res.status === 409 && data.error === "bunny_shield") return { error: "bunny_shield" };
+      if (!res.ok) return { error: data.error || "fetch failed" };
+      return { card: data.card as Card };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "network error" };
+    }
+  }
+
+  async function handleConveneLinks() {
+    const tokens = input.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    if (!tokens.length || busy) return;
+    setBusy(true);
     setError("");
     setPasteMode(false);
-    setCard(null);
-    try {
-      const res = await fetch(`/api/card?input=${encodeURIComponent(input)}`);
-      const data = await res.json();
-      if (res.status === 409 && data.error === "bunny_shield") {
-        setPasteMode(true);
-      } else if (!res.ok) {
-        setError(data.error || "Failed to fetch card.");
-      } else {
-        setCard(data.card);
-        startCouncil(data.card);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error.");
-    } finally {
-      fetching.current = false;
+    const results = await Promise.all(tokens.map(resolveOne));
+    const cards = results.map((r) => r.card).filter(Boolean) as Card[];
+    const fails = results.filter((r) => !r.card);
+    setBusy(false);
+    if (!cards.length) {
+      if (fails.some((f) => f.error === "bunny_shield")) setPasteMode(true);
+      else setError(`Couldn't resolve any cards${fails[0]?.error ? ` (${fails[0].error})` : ""}.`);
+      return;
     }
+    if (fails.length) {
+      const shielded = fails.some((f) => f.error === "bunny_shield");
+      setError(
+        `Resolved ${cards.length}/${tokens.length}. ${fails.length} failed${shielded ? " — Bunny Shield blocked some; paste those manually." : "."}`
+      );
+    }
+    startBatch(cards);
   }
 
   async function handlePaste() {
@@ -78,110 +117,54 @@ export default function Home() {
         return;
       }
       setPasteMode(false);
-      setCard(data.card);
-      startCouncil(data.card);
+      setPasteValue("");
+      startBatch([data.card as Card]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not parse pasted card.");
     }
   }
 
-  async function startCouncil(c: Card) {
-    resetRun();
-    setRunning(true);
-    setStatus("Convening the council…");
+  // ---- Wallet mode: load a profile's predictable cards into the picker. ----
+  async function handleLoadWallet() {
+    if (!wallet.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    setPicker(null);
+    setSelected(new Set());
     try {
-      const res = await fetch("/api/council", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ card: c }),
-      });
-      if (!res.ok || !res.body) {
-        setError("Failed to start the council.");
-        setRunning(false);
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data:")) continue;
-          const json = line.slice(5).trim();
-          if (!json) continue;
-          handleEvent(JSON.parse(json) as CouncilEvent);
-        }
+      const res = await fetch(`/api/cards?wallet=${encodeURIComponent(wallet)}`);
+      const data = await res.json();
+      if (res.status === 409 && data.error === "bunny_shield") {
+        setError("Bunny Shield blocked the wallet fetch — set UPSHOT_BEARER/UPSHOT_COOKIE or try a clean IP.");
+      } else if (!res.ok) {
+        setError(data.error || "Failed to load cards.");
+      } else {
+        setPicker(data.cards as Card[]);
+        setPickerMeta({ total: data.total, shown: data.shown });
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Stream error.");
+      setError(e instanceof Error ? e.message : "Network error.");
     } finally {
-      setRunning(false);
+      setBusy(false);
     }
   }
 
-  function handleEvent(ev: CouncilEvent) {
-    switch (ev.type) {
-      case "card":
-        setCard(ev.card);
-        break;
-      case "status":
-        setStatus(ev.message);
-        if (ev.phase === "research" || ev.phase === "debate" || ev.phase === "verdict") {
-          setPhase(ev.phase);
-        }
-        break;
-      case "expert_start":
-        setExperts((prev) => ({
-          ...prev,
-          [ev.expertId]: { ...(prev[ev.expertId] ?? emptyExpert()), active: true },
-        }));
-        break;
-      case "delta":
-        setExperts((prev) => {
-          const cur = prev[ev.expertId] ?? emptyExpert();
-          const rk = ev.round === 1 ? "r1" : "r2";
-          return { ...prev, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], text: cur[rk].text + ev.text } } };
-        });
-        break;
-      case "think":
-        setExperts((prev) => {
-          const cur = prev[ev.expertId] ?? emptyExpert();
-          const rk = ev.round === 1 ? "r1" : "r2";
-          return { ...prev, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], think: cur[rk].think + ev.text } } };
-        });
-        break;
-      case "tool":
-        setExperts((prev) => {
-          const cur = prev[ev.expertId] ?? emptyExpert();
-          const rk = ev.round === 1 ? "r1" : "r2";
-          return {
-            ...prev,
-            [ev.expertId]: { ...cur, [rk]: { ...cur[rk], tools: [...cur[rk].tools, { tool: ev.tool, detail: ev.detail }] } },
-          };
-        });
-        break;
-      case "expert_done":
-        setExperts((prev) => ({
-          ...prev,
-          [ev.expertId]: { ...(prev[ev.expertId] ?? emptyExpert()), active: false },
-        }));
-        break;
-      case "verdict_delta":
-        setVerdict((v) => v + ev.text);
-        break;
-      case "error":
-        setError(ev.message);
-        break;
-      case "done":
-        setStatus("Verdict delivered.");
-        setPhase("done");
-        break;
-    }
+  const filtered = useMemo(() => {
+    if (!picker) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return picker;
+    return picker.filter((c) =>
+      `${c.name} ${c.event?.name ?? ""} ${c.rarity ?? ""}`.toLowerCase().includes(q)
+    );
+  }, [picker, search]);
+
+  function toggle(id: string) {
+    setSelected((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
   }
 
   return (
@@ -211,20 +194,48 @@ export default function Home() {
         {EXPERTS.length} AI prediction-market pilots research, debate, and call your Upshot card.
       </p>
 
-      <div className="searchbar">
-        <span className="lead">CARD ID ▸</span>
-        <input
-          type="text"
-          placeholder="paste a card ID or upshot.cards URL…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleResolve()}
-          disabled={running}
-        />
-        <button onClick={handleResolve} disabled={running || !input.trim()}>
-          {running ? "DELIBERATING" : "CONVENE"}
+      <div className="tabs">
+        <button className={mode === "link" ? "on" : ""} onClick={() => setMode("link")}>
+          PASTE LINKS
+        </button>
+        <button className={mode === "wallet" ? "on" : ""} onClick={() => setMode("wallet")}>
+          FROM WALLET
         </button>
       </div>
+
+      {mode === "link" && (
+        <div className="searchbar col">
+          <span className="lead">CARD IDs ▸</span>
+          <textarea
+            className="multiline"
+            placeholder="paste one or many card IDs / upshot.cards URLs — one per line…"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={busy}
+            rows={3}
+          />
+          <button onClick={handleConveneLinks} disabled={busy || !input.trim()}>
+            {busy ? "RESOLVING…" : "CONVENE"}
+          </button>
+        </div>
+      )}
+
+      {mode === "wallet" && (
+        <div className="searchbar">
+          <span className="lead">WALLET ▸</span>
+          <input
+            type="text"
+            placeholder="0x… or upshot.cards/profile/0x…"
+            value={wallet}
+            onChange={(e) => setWallet(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleLoadWallet()}
+            disabled={busy}
+          />
+          <button onClick={handleLoadWallet} disabled={busy || !wallet.trim()}>
+            {busy ? "LOADING…" : "LOAD CARDS"}
+          </button>
+        </div>
+      )}
 
       {error && <div className="error">{error}</div>}
 
@@ -247,18 +258,212 @@ export default function Home() {
         </div>
       )}
 
-      {card && <CardHeader card={card} />}
-
-      {status && (
-        <div className="status">
-          {running && <span className="spinner" />}
-          {status}
+      {mode === "wallet" && picker && runs.length === 0 && (
+        <div className="picker">
+          <div className="picker-head">
+            <input
+              className="picker-search"
+              placeholder="search by card / event / rarity…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <span className="picker-meta">
+              {pickerMeta ? `${pickerMeta.shown} open · ${pickerMeta.total} owned` : ""}
+              {search ? ` · ${filtered.length} match` : ""}
+            </span>
+            <button className="ghost" onClick={() => setSelected(new Set(filtered.map((c) => c.id)))}>
+              SELECT ALL{search ? " (FILTERED)" : ""}
+            </button>
+            <button className="ghost" onClick={() => setSelected(new Set())}>
+              CLEAR
+            </button>
+            <button
+              className="solid"
+              disabled={selected.size === 0}
+              onClick={() => startBatch((picker ?? []).filter((c) => selected.has(c.id)))}
+            >
+              PREDICT {selected.size || ""} →
+            </button>
+          </div>
+          {picker.length === 0 ? (
+            <div className="picker-empty">
+              No cards open to predict — every owned card is past its deadline or already resolved.
+            </div>
+          ) : (
+            <div className="picker-list">
+              {filtered.map((c) => (
+                <label key={c.id} className={`pick ${selected.has(c.id) ? "sel" : ""}`}>
+                  <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} />
+                  <span className="pick-name">{c.name}</span>
+                  <span className="pick-ev">{c.event?.name ?? ""}</span>
+                  <span className="pick-when">
+                    {c.event?.eventDate ? new Date(c.event.eventDate).toLocaleDateString() : ""}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
+      {runs.length > 0 && (
+        <>
+          <div className="batchbar">
+            <span className="section-label">
+              COUNCIL BATCH · {runs.length} CARD{runs.length > 1 ? "S" : ""} ·{" "}
+              {doneIds.size}/{runs.length} DONE · MAX {CONCURRENCY} LIVE
+            </span>
+            <button className="ghost" onClick={resetBatch}>
+              NEW BATCH
+            </button>
+          </div>
+          <div className="runs">
+            {runs.map((c, i) => (
+              <CouncilRun key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="foot">
+        UPSHOUT COUNCIL <b>//</b> NOT FINANCIAL ADVICE <b>//</b> IT&apos;S JUST NUMBERS
+      </div>
+    </div>
+  );
+}
+
+// One independent council run: owns its own stream + state so parallel runs
+// never share state or interrupt each other. Starts streaming once `active`.
+function CouncilRun({
+  card: initialCard,
+  active,
+  onDone,
+}: {
+  card: Card;
+  active: boolean;
+  onDone: (id: string) => void;
+}) {
+  const [card, setCard] = useState<Card>(initialCard);
+  const [experts, setExperts] = useState<Record<string, ExpertState>>(() =>
+    Object.fromEntries(EXPERTS.map((e) => [e.id, emptyExpert()]))
+  );
+  const [verdict, setVerdict] = useState("");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [status, setStatus] = useState("Queued…");
+  const [error, setError] = useState("");
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (!active || started.current) return;
+    started.current = true;
+
+    const apply = (ev: CouncilEvent) => {
+      switch (ev.type) {
+        case "card":
+          setCard(ev.card);
+          break;
+        case "status":
+          setStatus(ev.message);
+          if (ev.phase === "research" || ev.phase === "debate" || ev.phase === "verdict")
+            setPhase(ev.phase);
+          break;
+        case "expert_start":
+          setExperts((p) => ({ ...p, [ev.expertId]: { ...(p[ev.expertId] ?? emptyExpert()), active: true } }));
+          break;
+        case "delta":
+          setExperts((p) => {
+            const cur = p[ev.expertId] ?? emptyExpert();
+            const rk = ev.round === 1 ? "r1" : "r2";
+            return { ...p, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], text: cur[rk].text + ev.text } } };
+          });
+          break;
+        case "think":
+          setExperts((p) => {
+            const cur = p[ev.expertId] ?? emptyExpert();
+            const rk = ev.round === 1 ? "r1" : "r2";
+            return { ...p, [ev.expertId]: { ...cur, [rk]: { ...cur[rk], think: cur[rk].think + ev.text } } };
+          });
+          break;
+        case "tool":
+          setExperts((p) => {
+            const cur = p[ev.expertId] ?? emptyExpert();
+            const rk = ev.round === 1 ? "r1" : "r2";
+            return {
+              ...p,
+              [ev.expertId]: { ...cur, [rk]: { ...cur[rk], tools: [...cur[rk].tools, { tool: ev.tool, detail: ev.detail }] } },
+            };
+          });
+          break;
+        case "expert_done":
+          setExperts((p) => ({ ...p, [ev.expertId]: { ...(p[ev.expertId] ?? emptyExpert()), active: false } }));
+          break;
+        case "verdict_delta":
+          setVerdict((v) => v + ev.text);
+          break;
+        case "error":
+          setError(ev.message);
+          break;
+        case "done":
+          setStatus("Verdict delivered.");
+          setPhase("done");
+          break;
+      }
+    };
+
+    (async () => {
+      setPhase("research");
+      setStatus("Convening the council…");
+      try {
+        const res = await fetch("/api/council", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ card: initialCard }),
+        });
+        if (!res.ok || !res.body) {
+          setError("Failed to start the council.");
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            const json = line.slice(5).trim();
+            if (json) apply(JSON.parse(json) as CouncilEvent);
+          }
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Stream error.");
+      } finally {
+        onDone(initialCard.id);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  const queued = !started.current && !active;
+  const running = phase !== "idle" && phase !== "done";
+
+  return (
+    <section className="run">
+      <CardHeader card={card} />
+
+      <div className="status">
+        {running && <span className="spinner" />}
+        {queued ? "Queued — waiting for a free slot…" : status}
+      </div>
+
+      {error && <div className="error">{error}</div>}
       {verdict && <Verdict text={verdict} />}
 
-      {card && phase !== "debate" && (
+      {phase !== "idle" && phase !== "debate" && (
         <>
           <div className="section-label">
             PILOT GRID · {String(EXPERTS.length).padStart(2, "0")}
@@ -272,10 +477,7 @@ export default function Home() {
                 <div
                   key={e.id}
                   className="expert"
-                  style={{
-                    ["--xc" as string]: `var(--${e.id})`,
-                    animationDelay: `${i * 70}ms`,
-                  }}
+                  style={{ ["--xc" as string]: `var(--${e.id})`, animationDelay: `${i * 70}ms` }}
                 >
                   <div className="ehead">
                     <div>
@@ -285,7 +487,6 @@ export default function Home() {
                     {st?.active && <span className="spinner" />}
                   </div>
                   <div className="ebias">{e.bias}</div>
-
                   <div className="readout">
                     <div className="bigp">
                       {prob != null ? prob : "––"}
@@ -296,13 +497,10 @@ export default function Home() {
                     </div>
                     {lean && <span className={`lean ${lean}`}>{lean}</span>}
                   </div>
-
                   {st && hasRound(st.r1) && (
                     <Round label="ROUND 1 · RESEARCH" data={st.r1} mentions={false} />
                   )}
-                  {st && hasRound(st.r2) && (
-                    <Round label="ROUND 2 · DEBATE" data={st.r2} mentions />
-                  )}
+                  {st && hasRound(st.r2) && <Round label="ROUND 2 · DEBATE" data={st.r2} mentions />}
                 </div>
               );
             })}
@@ -310,7 +508,7 @@ export default function Home() {
         </>
       )}
 
-      {card && (phase === "debate" || phase === "verdict" || phase === "done") && (
+      {(phase === "debate" || phase === "verdict" || phase === "done") && (
         <>
           <div className="section-label">
             THE DEBATE FLOOR · WHO CHALLENGED WHOM
@@ -319,13 +517,7 @@ export default function Home() {
           <DebateArena experts={experts} live={phase === "debate"} />
         </>
       )}
-
-      {card && (
-        <div className="foot">
-          UPSHOUT COUNCIL <b>//</b> NOT FINANCIAL ADVICE <b>//</b> IT&apos;S JUST NUMBERS
-        </div>
-      )}
-    </div>
+    </section>
   );
 }
 
