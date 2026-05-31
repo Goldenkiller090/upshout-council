@@ -451,8 +451,7 @@ function EventRow({
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (!active || started.current || phase === "stopped") return;
-    started.current = true;
+    if (!active || phase === "stopped") return;
     setPhase("running");
     const controller = new AbortController();
     abortRef.current = controller;
@@ -499,9 +498,14 @@ function EventRow({
           setPhase("error");
         }
       } finally {
-        onDone(card.id);
+        // Don't mark done if we were aborted (unmount / StrictMode) — that would
+        // slide the scheduler window and over-spawn. Real completions still call it.
+        if (!controller.signal.aborted) onDone(card.id);
       }
     })();
+    // Aborts the in-flight council if this row unmounts (e.g. NEW BATCH) so the
+    // server-side run stops spending the subscription instead of orphaning.
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
@@ -584,7 +588,6 @@ function CouncilRun({
     divergent: boolean;
   } | null>(null);
   const [stopped, setStopped] = useState(false);
-  const started = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
 
   function stop() {
@@ -596,8 +599,7 @@ function CouncilRun({
   }
 
   useEffect(() => {
-    if (!active || started.current || stopped) return;
-    started.current = true;
+    if (!active || stopped) return;
 
     const apply = (ev: CouncilEvent) => {
       switch (ev.type) {
@@ -698,13 +700,17 @@ function CouncilRun({
         // Swallow the abort that Stop / unmount triggers; surface real errors.
         if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Stream error.");
       } finally {
-        onDone(initialCard.id);
+        // Skip if aborted (unmount / StrictMode), else the scheduler over-spawns.
+        if (!controller.signal.aborted) onDone(initialCard.id);
       }
     })();
+    // Aborts the in-flight council if this panel unmounts (e.g. NEW BATCH) so the
+    // server-side run stops spending the subscription instead of orphaning.
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
-  const queued = !started.current && !active;
+  const queued = !active && phase === "idle";
   const running = phase !== "idle" && phase !== "done";
 
   return (
