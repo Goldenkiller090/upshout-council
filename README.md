@@ -20,6 +20,10 @@ WipEout '95 HUD.
   card that profile owns, then **search and filter** (by prize currency you can win —
   CASH / GOLD / SHOT — and by rarity) and multi-select which to predict. Only cards still
   **open to predict** (not resolved, not past their event date) are shown.
+- **Event** — paste an `upshot.cards/event/<id>` URL to fetch every outcome card in that
+  event and auto-run them. Shown as a **compact verdict list** (no per-card debate UI,
+  since events can have many cards): each row has a live status dot, and on finish the win
+  probability, a BUY/HOLD/PASS call, and a **BUY ↗** link straight to the card.
 
 Selected cards run as **parallel councils** — up to **3 at once** (they share your single
 subscription), the rest queue automatically. Each card gets its own independent panel with
