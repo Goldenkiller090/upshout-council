@@ -107,6 +107,7 @@ export function normalizeCard(raw: Record<string, unknown>): Card {
     })(),
     image: d.image as string | undefined,
     outcomeId: d.outcomeId as string | undefined,
+    outcomeName: (d.outcome as Record<string, unknown> | undefined)?.name as string | undefined,
     event: event
       ? {
           id: event.id as string | undefined,
@@ -135,6 +136,33 @@ export function fromMicro(value?: string | number): number | null {
 export function parseWallet(input: string): string | null {
   const m = input.trim().match(/0x[a-fA-F0-9]{40}/);
   return m ? m[0] : null;
+}
+
+/** Extract an event ID from a raw ID or an upshot.cards/event/<id> URL. */
+export function parseEventId(input: string): string | null {
+  const t = input.trim();
+  const m = t.match(/event\/(cm[a-z0-9]{15,})/i);
+  if (m) return m[1];
+  if (/^cm[a-z0-9]{15,}$/i.test(t)) return t;
+  return null;
+}
+
+/** Fetch every card (one per outcome) for an event, normalized. */
+export async function fetchEventCards(
+  eventId: string
+): Promise<{ eventName: string; cards: Card[] }> {
+  const cards: Card[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const res = (await getJson(
+      `${API_BASE}/cards?eventId=${eventId}&include=event,supply&perPage=100&page=${page}`
+    )) as { data?: unknown[]; meta?: { lastPage?: number } };
+    const arr = Array.isArray(res.data) ? res.data : [];
+    for (const c of arr) cards.push(normalizeCard(c as Record<string, unknown>));
+    const last = res.meta?.lastPage ?? 1;
+    if (!arr.length || page >= last) break;
+  }
+  const eventName = cards.find((c) => c.event?.name)?.event?.name ?? "";
+  return { eventName, cards };
 }
 
 /** True if a card's event is still open to predict on (not resolved, not past its date). */

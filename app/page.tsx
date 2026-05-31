@@ -22,9 +22,10 @@ type Phase = "idle" | "research" | "debate" | "verdict" | "done";
 const CONCURRENCY = 3; // councils streaming at once (shared single subscription)
 
 export default function Home() {
-  const [mode, setMode] = useState<"link" | "wallet">("link");
+  const [mode, setMode] = useState<"link" | "wallet" | "event">("link");
   const [input, setInput] = useState(""); // one or many IDs/URLs (newline/comma separated)
   const [wallet, setWallet] = useState("");
+  const [eventUrl, setEventUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pasteMode, setPasteMode] = useState(false);
@@ -41,23 +42,29 @@ export default function Home() {
   // the batch actually running, + which runs have finished (for the scheduler)
   const [runs, setRuns] = useState<Card[]>([]);
   const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
+  const [runView, setRunView] = useState<"full" | "compact">("full");
+  const [batchTitle, setBatchTitle] = useState("");
 
   const markDone = useCallback(
     (id: string) => setDoneIds((p) => new Set(p).add(id)),
     []
   );
 
-  function startBatch(cards: Card[]) {
+  // `compact` is the event view: just the verdict per card, no debate/stream UI.
+  function startBatch(cards: Card[], view: "full" | "compact" = "full", title = "") {
     const seen = new Set<string>();
     const uniq = cards.filter((c) => c.id && !seen.has(c.id) && seen.add(c.id));
     if (!uniq.length) return;
     setDoneIds(new Set());
+    setRunView(view);
+    setBatchTitle(title);
     setRuns(uniq);
   }
 
   function resetBatch() {
     setRuns([]);
     setDoneIds(new Set());
+    setBatchTitle("");
     setError("");
   }
 
@@ -151,6 +158,28 @@ export default function Home() {
     }
   }
 
+  // ---- Event mode: load every card of an event and auto-run them (compact view). ----
+  async function handleLoadEvent() {
+    if (!eventUrl.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/event?event=${encodeURIComponent(eventUrl)}`);
+      const data = await res.json();
+      if (res.status === 409 && data.error === "bunny_shield") {
+        setError("Bunny Shield blocked the event fetch — set UPSHOT_BEARER/UPSHOT_COOKIE or try a clean IP.");
+      } else if (!res.ok) {
+        setError(data.error || "Failed to load event.");
+      } else {
+        startBatch(data.cards as Card[], "compact", data.eventName || "EVENT");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const prizeOf = (c: Card) => (c.prizeType ?? c.event?.kind ?? "").toUpperCase();
   const rarityOf = (c: Card) => (c.rarity ?? "").toUpperCase();
 
@@ -218,6 +247,9 @@ export default function Home() {
         <button className={mode === "wallet" ? "on" : ""} onClick={() => setMode("wallet")}>
           FROM WALLET
         </button>
+        <button className={mode === "event" ? "on" : ""} onClick={() => setMode("event")}>
+          EVENT
+        </button>
       </div>
 
       {mode === "link" && (
@@ -250,6 +282,23 @@ export default function Home() {
           />
           <button onClick={handleLoadWallet} disabled={busy || !wallet.trim()}>
             {busy ? "LOADING…" : "LOAD CARDS"}
+          </button>
+        </div>
+      )}
+
+      {mode === "event" && (
+        <div className="searchbar">
+          <span className="lead">EVENT ▸</span>
+          <input
+            type="text"
+            placeholder="upshot.cards/event/cm… (predicts every card, 3 at a time)"
+            value={eventUrl}
+            onChange={(e) => setEventUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleLoadEvent()}
+            disabled={busy}
+          />
+          <button onClick={handleLoadEvent} disabled={busy || !eventUrl.trim()}>
+            {busy ? "LOADING…" : "RUN EVENT"}
           </button>
         </div>
       )}
@@ -351,24 +400,159 @@ export default function Home() {
         <>
           <div className="batchbar">
             <span className="section-label">
-              COUNCIL BATCH · {runs.length} CARD{runs.length > 1 ? "S" : ""} ·{" "}
-              {doneIds.size}/{runs.length} DONE · MAX {CONCURRENCY} LIVE
+              {runView === "compact" ? (batchTitle || "EVENT").toUpperCase() : "COUNCIL BATCH"} ·{" "}
+              {runs.length} CARD{runs.length > 1 ? "S" : ""} · {doneIds.size}/{runs.length} DONE ·
+              MAX {CONCURRENCY} LIVE
             </span>
             <button className="ghost" onClick={resetBatch}>
               NEW BATCH
             </button>
           </div>
-          <div className="runs">
-            {runs.map((c, i) => (
-              <CouncilRun key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
-            ))}
-          </div>
+          {runView === "compact" ? (
+            <div className="event-list">
+              {runs.map((c, i) => (
+                <EventRow key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
+              ))}
+            </div>
+          ) : (
+            <div className="runs">
+              {runs.map((c, i) => (
+                <CouncilRun key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
+              ))}
+            </div>
+          )}
         </>
       )}
 
       <div className="foot">
         UPSHOUT COUNCIL <b>//</b> NOT FINANCIAL ADVICE <b>//</b> IT&apos;S JUST NUMBERS
       </div>
+    </div>
+  );
+}
+
+// Compact event-mode run: same council + debate under the hood, but we skip the
+// streaming/debate UI and surface only the final verdict (events can have many cards).
+function EventRow({
+  card,
+  active,
+  onDone,
+}: {
+  card: Card;
+  active: boolean;
+  onDone: (id: string) => void;
+}) {
+  const [phase, setPhase] = useState<"queued" | "running" | "done" | "error" | "stopped">(
+    active ? "running" : "queued"
+  );
+  const [verdict, setVerdict] = useState("");
+  const [errMsg, setErrMsg] = useState("");
+  const started = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!active || started.current || phase === "stopped") return;
+    started.current = true;
+    setPhase("running");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    (async () => {
+      try {
+        const res = await fetch("/api/council", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ card }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          setErrMsg("failed to start");
+          setPhase("error");
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let failed = false;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            const json = line.slice(5).trim();
+            if (!json) continue;
+            const ev = JSON.parse(json) as CouncilEvent;
+            if (ev.type === "verdict_delta") setVerdict((v) => v + ev.text);
+            else if (ev.type === "error") {
+              failed = true;
+              setErrMsg(ev.message);
+            } else if (ev.type === "done") setPhase((p) => (p === "running" ? "done" : p));
+          }
+        }
+        if (failed) setPhase((p) => (p === "running" ? "error" : p));
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setErrMsg(e instanceof Error ? e.message : "stream error");
+          setPhase("error");
+        }
+      } finally {
+        onDone(card.id);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  function stop() {
+    abortRef.current?.abort();
+    setPhase("stopped");
+    onDone(card.id);
+  }
+
+  const prob = phase === "done" ? extractVerdictProb(verdict) : null;
+  const call = phase === "done" ? extractVerdictCall(verdict) : null;
+  const cardUrl = `https://upshot.cards/card-detail/${card.id}`;
+
+  return (
+    <div className={`erow ${phase}`}>
+      <span className="erow-dot" />
+      <div className="erow-main">
+        <div className="erow-name">{card.outcomeName || card.name}</div>
+        <div className="erow-sub">{card.outcomeName ? card.name : card.event?.name ?? ""}</div>
+      </div>
+      <div className="erow-state">
+        {phase === "queued" && <span className="erow-tag">QUEUED</span>}
+        {phase === "running" && (
+          <span className="erow-tag run">
+            <span className="spinner" /> RUNNING
+          </span>
+        )}
+        {phase === "stopped" && <span className="erow-tag">STOPPED</span>}
+        {phase === "error" && (
+          <span className="erow-tag err" title={errMsg}>
+            ERROR
+          </span>
+        )}
+        {phase === "done" && (
+          <>
+            <span className="erow-prob">{prob != null ? `${prob}%` : "—"}</span>
+            {call && <span className={`callbadge sm ${call}`}>{call}</span>}
+          </>
+        )}
+      </div>
+      {phase === "running" ? (
+        <button className="stop sm" onClick={stop}>
+          ◼
+        </button>
+      ) : phase === "done" ? (
+        <a className="buybtn" href={cardUrl} target="_blank" rel="noreferrer">
+          BUY ↗
+        </a>
+      ) : (
+        <span className="buybtn-spacer" />
+      )}
     </div>
   );
 }

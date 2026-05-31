@@ -21,6 +21,8 @@ export interface Card {
   owned?: number;
   image?: string;
   outcomeId?: string;
+  /** The specific outcome this card represents (e.g. "≤ 20%", "Frampton"). */
+  outcomeName?: string;
   event?: {
     id?: string;
     name?: string;
