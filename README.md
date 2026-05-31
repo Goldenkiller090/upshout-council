@@ -59,8 +59,9 @@ turn, and `lib/llm` dispatches to whichever backend you selected.
 
 (Recency is a cross-cutting instruction every pilot follows, rather than a dedicated seat.)
 
-Experts run on the faster model (Sonnet / `gpt-5-codex`); the synthesizer on the strongest
-(Opus / `gpt-5-codex`). Both via your subscription — see below.
+Experts and the synthesizer all run on Sonnet / `gpt-5-codex` by default — a synth turn
+runs per card, and Opus is ~5× the cost, so it is **not** the default. Override with
+`CLAUDE_SYNTH_MODEL=opus` only if you accept that burn. All via your subscription — see below.
 
 ---
 
@@ -100,7 +101,7 @@ LLM_PROVIDER=claude
 > bills the API instead of using your subscription.
 
 The `claude` binary must be on your `PATH` (it is, if you use Claude Code). Optional model
-overrides: `CLAUDE_EXPERT_MODEL` (default `sonnet`), `CLAUDE_SYNTH_MODEL` (default `opus`).
+overrides: `CLAUDE_EXPERT_MODEL` (default `sonnet`), `CLAUDE_SYNTH_MODEL` (default `sonnet`).
 </details>
 
 <details>
@@ -166,7 +167,7 @@ Restart `npm run dev` after changing `.env.local`.
 | --- | --- | --- |
 | `LLM_PROVIDER` | `claude` | `claude` or `codex` |
 | `CLAUDE_EXPERT_MODEL` | `sonnet` | expert model (Claude) |
-| `CLAUDE_SYNTH_MODEL` | `opus` | synthesizer model (Claude) |
+| `CLAUDE_SYNTH_MODEL` | `sonnet` | synthesizer model (Claude) |
 | `CODEX_EXPERT_MODEL` | `gpt-5-codex` | expert model (Codex) |
 | `CODEX_SYNTH_MODEL` | `gpt-5-codex` | synthesizer model (Codex) |
 | `CODEX_REASONING_EFFORT` | — | Codex reasoning effort |

@@ -224,10 +224,16 @@ async function runExpert(
  * Orchestrate the full council deliberation:
  *   Round 1 — five experts independently research and give a take (parallel)
  *   Round 2 — each expert rebuts the others after seeing all takes (parallel)
- *   Synthesis — Opus weighs everything into a final verdict (streamed)
+ *   Synthesis — the chair weighs everything into a final verdict (streamed)
  */
 export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): Promise<void> {
   const brief = cardBrief(card);
+
+  // Bail the instant the client stops listening (Stop / NEW BATCH / disconnect).
+  // Without this, an aborted run still launches round 2 (4 turns) + synth, burning
+  // the subscription on work nobody will see.
+  const aborted = () => signal?.aborted === true;
+  if (aborted()) return;
 
   // ---- Round 1: independent research ----
   emit({
@@ -241,6 +247,8 @@ export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): 
   const round1 = await Promise.all(
     EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit, signal))
   );
+
+  if (aborted()) return;
 
   // ---- Round 2: rebuttal / deliberation ----
   emit({ type: "status", phase: "debate", message: "Council debating each other's takes…" });
@@ -264,6 +272,8 @@ export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): 
     (e, i) =>
       `${digest(e, round1[i])}\n\n### ${e.name} (${e.bias}) — FINAL take (after debate):\n${round2[i].trim()}`
   ).join("\n\n");
+
+  if (aborted()) return;
 
   // ---- Synthesis: final verdict ----
   emit({ type: "status", phase: "verdict", message: "Synthesizing the final verdict…" });

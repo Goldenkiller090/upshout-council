@@ -2,9 +2,11 @@ import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { RunRequest, RunCallbacks } from "./types";
 
 // Model aliases resolve against your Claude subscription via the local CLI.
+// Everything defaults to Sonnet — Opus is ~5× the cost and we run a synth turn
+// per card (an event can be 10+ cards), so the default must never be Opus.
 function model(role: RunRequest["role"]): string {
   return role === "synth"
-    ? process.env.CLAUDE_SYNTH_MODEL ?? "opus"
+    ? process.env.CLAUDE_SYNTH_MODEL ?? "sonnet"
     : process.env.CLAUDE_EXPERT_MODEL ?? "sonnet";
 }
 
