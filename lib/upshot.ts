@@ -170,9 +170,13 @@ export async function fetchOwnedCards(wallet: string): Promise<Card[]> {
     const entries = Object.values(res.data ?? {});
     for (const entry of entries) {
       if (!entry?.card) continue;
-      const card = normalizeCard(entry.card);
-      card.owned =
+      const owned =
         (Number(entry.claimedQuantity ?? 0) || 0) + (Number(entry.unclaimedQuantity ?? 0) || 0);
+      // The balances endpoint also returns zero-quantity entries (cards the wallet
+      // once held / interacted with). Only surface cards actually owned right now.
+      if (owned <= 0) continue;
+      const card = normalizeCard(entry.card);
+      card.owned = owned;
       out.push(card);
     }
     const last = res.meta?.lastPage ?? 1;

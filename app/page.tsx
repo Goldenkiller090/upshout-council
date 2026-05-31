@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Card, CouncilEvent } from "@/lib/types";
 import { EXPERTS } from "@/lib/experts";
 import { fromMicro } from "@/lib/upshot";
-import { extractCall, extractVerdictProb } from "@/lib/parse";
+import { extractCall, extractVerdictProb, extractVerdictCall } from "@/lib/parse";
 
 type RoundData = { text: string; think: string; tools: { tool: string; detail: string }[] };
 type ExpertState = { r1: RoundData; r2: RoundData; active: boolean };
@@ -891,19 +891,23 @@ function Verdict({ text }: { text: string }) {
   // Robust parse: "Final probability" section first, handling bold/decimal/range.
   const heroNum = extractVerdictProb(text);
   const hero = heroNum != null ? String(heroNum) : null;
+  const call = extractVerdictCall(text);
 
   return (
     <div className="verdict">
-      {hero && (
+      {(hero || call) && (
         <div className="hero">
-          <div className="num">
-            {hero}
-            <small>%</small>
-          </div>
+          {hero && (
+            <div className="num">
+              {hero}
+              <small>%</small>
+            </div>
+          )}
           <div className="label">
             COUNCIL
             <br />
             WIN PROBABILITY
+            {call && <span className={`callbadge ${call}`}>{call}</span>}
           </div>
         </div>
       )}

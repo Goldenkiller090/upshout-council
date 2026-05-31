@@ -771,20 +771,20 @@ textarea {
   background:
     linear-gradient(180deg, rgba(255, 46, 151, 0.1), rgba(0, 240, 255, 0.05)),
     rgba(8, 10, 24, 0.8);
-  padding: 26px 28px 30px;
+  padding: 40px 28px 30px;
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%);
 }
+/* Sits inside the box: clip-path would shear a negative-top label, so keep it >0. */
 .verdict::before {
   content: "RACE RESULT // FINAL CALL";
   position: absolute;
-  top: -8px;
-  left: 18px;
+  top: 12px;
+  left: 20px;
   font-family: var(--display);
   font-size: 10px;
   letter-spacing: 0.24em;
   color: var(--magenta);
-  background: var(--bg);
-  padding: 0 10px;
+  padding: 0;
 }
 .verdict-md h2 {
   font-family: var(--display);
@@ -829,6 +829,20 @@ textarea {
   color: var(--dim);
   text-transform: uppercase;
 }
+.callbadge {
+  display: block;
+  width: fit-content;
+  margin-top: 10px;
+  font-family: var(--display);
+  font-size: 15px;
+  letter-spacing: 0.2em;
+  padding: 5px 14px;
+  border: 1px solid currentColor;
+}
+.callbadge.BUY { color: var(--buy); }
+.callbadge.HOLD { color: var(--hold); }
+.callbadge.PASS,
+.callbadge.SELL { color: var(--pass); }
 
 .foot {
   margin-top: 40px;
@@ -994,7 +1008,7 @@ button.ghost:hover:not(:disabled) {
 }
 
 /* ---- Stop button (per run) ---- */
-.status > span { flex: 1; }
+.status > span:not(.spinner) { flex: 1; } /* push Stop right; never stretch the spinner */
 button.stop {
   background: transparent;
   color: var(--pass);

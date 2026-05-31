@@ -42,3 +42,19 @@ export function extractVerdictProb(text: string): number | null {
   }
   return scan(t);
 }
+
+/** Pull the BUY/HOLD/PASS (or SELL) call from a synthesizer verdict. */
+export function extractVerdictCall(text: string): "BUY" | "HOLD" | "PASS" | "SELL" | null {
+  const t = deEmphasize(text).toUpperCase();
+  const scan = (s: string) => {
+    const m = s.match(/\b(BUY|HOLD|PASS|SELL)\b/);
+    return m ? (m[1] as "BUY" | "HOLD" | "PASS" | "SELL") : null;
+  };
+  // Prefer the "Recommendation" section.
+  const sec = t.match(/RECOMMENDATION[^\n]*\n+([\s\S]{0,220})/);
+  if (sec) {
+    const r = scan(sec[1]);
+    if (r) return r;
+  }
+  return scan(t);
+}
