@@ -17,6 +17,8 @@ export interface Card {
   actualPrize?: string;
   /** How many of maxSupply have been minted — if minted >= maxSupply, the mint is sold out. */
   minted?: number;
+  /** How many copies the queried wallet owns (set when listing a profile's cards). */
+  owned?: number;
   image?: string;
   outcomeId?: string;
   event?: {

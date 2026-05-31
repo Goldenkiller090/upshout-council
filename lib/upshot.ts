@@ -130,3 +130,53 @@ export function fromMicro(value?: string | number): number | null {
   if (Number.isNaN(n)) return null;
   return n / 1_000_000;
 }
+
+/** Extract a wallet address (0x + 40 hex) from a raw address or profile URL. */
+export function parseWallet(input: string): string | null {
+  const m = input.trim().match(/0x[a-fA-F0-9]{40}/);
+  return m ? m[0] : null;
+}
+
+/** True if a card's event is still open to predict on (not resolved, not past its date). */
+export function isPredictable(card: Card): boolean {
+  const e = card.event;
+  if (!e) return true;
+  if (e.status === "RESOLVED" || e.winningOutcomeId) return false;
+  if (e.eventDate) {
+    const ms = Date.parse(e.eventDate);
+    if (!Number.isNaN(ms) && ms < Date.now()) return false;
+  }
+  return true;
+}
+
+/**
+ * Fetch the cards a wallet owns (balances?include=card), normalized. The endpoint
+ * returns `data` keyed by cardId with a nested `card` object and owned quantities.
+ * Throws BunnyShieldError if the API is gated.
+ */
+export async function fetchOwnedCards(wallet: string): Promise<Card[]> {
+  const out: Card[] = [];
+  const perPage = 100;
+  for (let page = 1; page <= 10; page++) {
+    const res = (await getJson(
+      `${API_BASE}/cards/balances/${wallet}?include=card&perPage=${perPage}&page=${page}`
+    )) as {
+      data?: Record<
+        string,
+        { card?: Record<string, unknown>; claimedQuantity?: string; unclaimedQuantity?: string }
+      >;
+      meta?: { lastPage?: number };
+    };
+    const entries = Object.values(res.data ?? {});
+    for (const entry of entries) {
+      if (!entry?.card) continue;
+      const card = normalizeCard(entry.card);
+      card.owned =
+        (Number(entry.claimedQuantity ?? 0) || 0) + (Number(entry.unclaimedQuantity ?? 0) || 0);
+      out.push(card);
+    }
+    const last = res.meta?.lastPage ?? 1;
+    if (!entries.length || page >= last) break;
+  }
+  return out;
+}
