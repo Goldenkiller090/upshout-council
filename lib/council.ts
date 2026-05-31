@@ -2,6 +2,17 @@ import type { Card, CouncilEvent, Expert } from "./types";
 import { EXPERTS } from "./experts";
 import { fromMicro } from "./upshot";
 import { runAgent, providerLabel } from "./llm";
+import { extractCall } from "./parse";
+
+/** One-line, token-cheap digest of a round-1 take for feeding to others/the synth. */
+function digest(expert: Expert, text: string): string {
+  const { prob, lean } = extractCall(text);
+  const body = text.replace(/PROBABILITY:[\s\S]*$/i, "").trim();
+  const thesis = body.replace(/\s+/g, " ").slice(0, 280);
+  return `### ${expert.name} (${expert.bias}) — ${prob ?? "?"}% · ${lean ?? "?"}\n${thesis}${
+    body.length > 280 ? "…" : ""
+  }`;
+}
 
 type Emit = (event: CouncilEvent) => void;
 
@@ -88,6 +99,22 @@ function cardBrief(card: Card): string {
     );
     const sell = fromMicro(card.pricing?.sellPrice);
     if (sell != null) lines.push(`Sell-back (bid): ${sell} ${cur}`);
+
+    // Deterministic break-even (computed in code, not left to the model).
+    const isCashPrize = (card.prizeType ?? card.event?.kind ?? "").toUpperCase() === "CASH";
+    const prizeUsd = isCashPrize ? fromMicro(card.potentialPrize ?? card.prizeAmount) : null;
+    if (prizeUsd && prizeUsd > 0) {
+      if (buyUsd != null) {
+        const be = (buyUsd / prizeUsd) * 100;
+        lines.push(
+          `Break-even win probability at this price: ${be.toFixed(be < 1 ? 2 : 1)}% — BUY only if you believe the outcome is MORE likely than this; PASS if less.`
+        );
+      } else {
+        lines.push(
+          `Break-even in USD needs a ${cur}/USD rate (none set) — solve for the break-even ${cur} value instead: it's +EV iff win_prob × $${prizeUsd.toFixed(2)} > ${buy} ${cur}.`
+        );
+      }
+    }
   }
   if (mintNum != null) {
     const mintLabel = (card.prizeType ?? card.event?.kind ?? "").toUpperCase() === "CASH"
@@ -100,6 +127,18 @@ function cardBrief(card: Card): string {
     );
   }
   if (card.pricing?.isTradeable != null) lines.push(`Tradeable: ${card.pricing.isTradeable}`);
+
+  // ---- Guard: don't "forecast" a settled or past-deadline event from priors ----
+  const eventMs = card.event?.eventDate ? Date.parse(card.event.eventDate) : NaN;
+  const pastDeadline = !Number.isNaN(eventMs) && eventMs < Date.now();
+  const resolved = card.event?.status === "RESOLVED" || !!card.event?.winningOutcomeId;
+  if (resolved || pastDeadline) {
+    lines.unshift(
+      `⚠️ RESOLUTION ALERT: this event is ${
+        resolved ? "marked RESOLVED" : "past its event date"
+      } (${card.event?.eventDate ?? "date unknown"}). Your FIRST task is to WEB-SEARCH the ACTUAL outcome and state plainly whether this card WON or LOST. Do NOT forecast a settled event from priors — find the real result. If you cannot confirm it, say so explicitly and do not invent a probability.`
+    );
+  }
   return lines.join("\n");
 }
 
@@ -132,7 +171,7 @@ async function runExpert(
 ): Promise<string> {
   emit({ type: "expert_start", expertId: expert.id, name: expert.name, bias: expert.bias, round });
 
-  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use web search to research current facts before you commit to a number. Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
+  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use web search to research current facts BEFORE you commit to a number — weight the most recent information heavily and stamp the date of time-sensitive facts (a settled or stale fact must not be treated as a live forecast). Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
 
   const full = await runAgent(
     { role: "expert", system, prompt: userPrompt, webSearch: true, maxTurns: 16 },
@@ -174,32 +213,33 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
 
   const round2 = await Promise.all(
     EXPERTS.map((e, selfIdx) => {
-      const others = EXPERTS.map((x, i) =>
-        i === selfIdx ? null : `### ${x.name} (${x.bias})\n${round1[i].trim()}`
-      )
+      // Feed digests, not full transcripts — same signal, a fraction of the tokens.
+      const others = EXPERTS.map((x, i) => (i === selfIdx ? null : digest(x, round1[i])))
         .filter(Boolean)
         .join("\n\n");
 
-      const prompt = `The card under review:\n\n${brief}\n\nHere are the other council members' first-round takes:\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Research further if needed. Then give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
+      const prompt = `The card under review:\n\n${brief}\n\nHere are the other council members' first-round takes (digested):\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Research further if needed. Then give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
       return runExpert(e, prompt, 2, emit);
     })
   );
 
+  // Synth gets each pilot's FINAL (round-2) take in full, plus a one-line digest of
+  // where they started — enough to see movement without re-sending both rounds whole.
   const finalTakes = EXPERTS.map(
     (e, i) =>
-      `### ${e.name} (${e.bias})\nRound 1:\n${round1[i].trim()}\n\nRound 2 (after debate):\n${round2[i].trim()}`
+      `${digest(e, round1[i])}\n\n### ${e.name} (${e.bias}) — FINAL take (after debate):\n${round2[i].trim()}`
   ).join("\n\n");
 
   // ---- Synthesis: final verdict ----
   emit({ type: "status", phase: "verdict", message: "Synthesizing the final verdict…" });
 
-  const synthSystem = `You are the chair of a prediction-market council. Five expert analysts with different
-biases (a quant, a domain insider, a contrarian, a market/odds reader, and a news analyst) have each researched
-and debated a card. Weigh their arguments — don't just average them. Note where they agree and where the
-disagreement is most informative. Be decisive but honest about uncertainty.\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}.`;
+  const synthSystem = `You are the chair of a prediction-market council. Four expert analysts with different
+biases (a quant on base rates, a domain insider on resolution mechanics, a contrarian, and a market/odds reader)
+have each researched and debated a card. Weigh their arguments — don't just average them. Note where they agree
+and where the disagreement is most informative. Be decisive but honest about uncertainty.\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}.`;
 
-  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the five pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
+  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the four pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
 
   await runAgent(
     { role: "synth", system: synthSystem, prompt: synthPrompt, webSearch: false, maxTurns: 2 },

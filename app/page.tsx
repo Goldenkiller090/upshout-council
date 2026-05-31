@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import type { Card, CouncilEvent } from "@/lib/types";
 import { EXPERTS } from "@/lib/experts";
 import { fromMicro } from "@/lib/upshot";
+import { extractCall, extractVerdictProb } from "@/lib/parse";
 
 type RoundData = { text: string; think: string; tools: { tool: string; detail: string }[] };
 type ExpertState = { r1: RoundData; r2: RoundData; active: boolean };
@@ -13,12 +14,7 @@ const emptyExpert = (): ExpertState => ({ r1: emptyRound(), r2: emptyRound(), ac
 
 // Pull the latest probability + lean an expert committed to (round 2 wins over round 1).
 function readout(st?: ExpertState): { prob: number | null; lean: string | null } {
-  const text = `${st?.r1.text ?? ""}\n${st?.r2.text ?? ""}`;
-  const probs = [...text.matchAll(/PROBABILITY:\s*(\d{1,3})/gi)];
-  const leans = [...text.matchAll(/LEAN:\s*(BUY|HOLD|PASS)/gi)];
-  const prob = probs.length ? Math.min(100, parseInt(probs[probs.length - 1][1], 10)) : null;
-  const lean = leans.length ? leans[leans.length - 1][1].toUpperCase() : null;
-  return { prob, lean };
+  return extractCall(`${st?.r1.text ?? ""}\n${st?.r2.text ?? ""}`);
 }
 
 type Phase = "idle" | "research" | "debate" | "verdict" | "done";
@@ -207,12 +203,12 @@ export default function Home() {
         </div>
         <div className="regblock">
           <div className="barcode" />
-          <small>UNIT 05 · ONLINE</small>
+          <small>UNIT {String(EXPERTS.length).padStart(2, "0")} · ONLINE</small>
         </div>
       </header>
 
       <p className="subtitle">
-        Five AI prediction-market pilots research, debate, and call your Upshot card.
+        {EXPERTS.length} AI prediction-market pilots research, debate, and call your Upshot card.
       </p>
 
       <div className="searchbar">
@@ -265,7 +261,8 @@ export default function Home() {
       {card && phase !== "debate" && (
         <>
           <div className="section-label">
-            PILOT GRID · 05{phase === "research" && " · RESEARCHING"}
+            PILOT GRID · {String(EXPERTS.length).padStart(2, "0")}
+            {phase === "research" && " · RESEARCHING"}
           </div>
           <div className="grid">
             {EXPERTS.map((e, i) => {
@@ -613,10 +610,9 @@ function CardHeader({ card }: { card: Card }) {
 }
 
 function Verdict({ text }: { text: string }) {
-  // Pull the number from the "Final probability" section if present; else first %.
-  const section = text.match(/final probability[^\n]*\n+[^\d]*?(\d{1,3})\s*%/i);
-  const heroMatch = section ?? text.match(/(\d{1,3})\s*%/);
-  const hero = heroMatch ? heroMatch[1] : null;
+  // Robust parse: "Final probability" section first, handling bold/decimal/range.
+  const heroNum = extractVerdictProb(text);
+  const hero = heroNum != null ? String(heroNum) : null;
 
   return (
     <div className="verdict">
