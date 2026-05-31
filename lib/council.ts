@@ -1,11 +1,7 @@
-import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { Card, CouncilEvent, Expert } from "./types";
 import { EXPERTS } from "./experts";
 import { fromMicro } from "./upshot";
-
-// Model aliases resolve against your Claude subscription via the local CLI.
-const EXPERT_MODEL = "sonnet";
-const SYNTH_MODEL = "opus";
+import { runAgent, providerLabel } from "./llm";
 
 type Emit = (event: CouncilEvent) => void;
 
@@ -127,73 +123,6 @@ Judging value (BUY / HOLD / PASS):
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-/**
- * Run one Agent SDK query, forwarding streamed text deltas to `onText`.
- * Returns the final assistant text. Uses the local Claude subscription;
- * WebSearch/WebFetch run headless (permissions bypassed for this trusted app).
- */
-interface QueryCallbacks {
-  onText: (text: string) => void;
-  onThink?: (text: string) => void;
-  onTool?: (tool: string, detail: string) => void;
-}
-
-/** Summarize a tool call's input into a short human label. */
-function toolDetail(name: string, input: unknown): string {
-  const i = (input ?? {}) as Record<string, unknown>;
-  if (name === "WebSearch") return String(i.query ?? "");
-  if (name === "WebFetch") return String(i.url ?? "");
-  const s = JSON.stringify(i);
-  return s.length > 80 ? s.slice(0, 80) + "…" : s;
-}
-
-async function runQuery(
-  prompt: string,
-  opts: { system: string; model: string; tools: string[]; maxTurns: number },
-  cb: QueryCallbacks
-): Promise<string> {
-  const options: Options = {
-    systemPrompt: opts.system,
-    model: opts.model,
-    allowedTools: opts.tools,
-    includePartialMessages: true,
-    maxTurns: opts.maxTurns,
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
-    // Don't inherit the user's CLAUDE.md / settings — keep runs isolated.
-    settingSources: [],
-  };
-
-  let streamed = "";
-  let finalText = "";
-
-  for await (const message of query({ prompt, options })) {
-    if (message.type === "stream_event") {
-      const ev = message.event as {
-        type: string;
-        delta?: { type?: string; text?: string; thinking?: string };
-      };
-      if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text) {
-        streamed += ev.delta.text;
-        cb.onText(ev.delta.text);
-      } else if (ev.type === "content_block_delta" && ev.delta?.type === "thinking_delta" && ev.delta.thinking) {
-        cb.onThink?.(ev.delta.thinking);
-      }
-    } else if (message.type === "assistant") {
-      // Surface tool use (web searches/fetches) as live activity.
-      for (const block of message.message.content) {
-        if (block.type === "tool_use") {
-          cb.onTool?.(block.name, toolDetail(block.name, block.input));
-        }
-      }
-    } else if (message.type === "result") {
-      if (message.subtype === "success") finalText = message.result;
-    }
-  }
-
-  return finalText.trim() || streamed.trim();
-}
-
 /** Run one expert turn with web search; forwards deltas and returns full text. */
 async function runExpert(
   expert: Expert,
@@ -203,11 +132,10 @@ async function runExpert(
 ): Promise<string> {
   emit({ type: "expert_start", expertId: expert.id, name: expert.name, bias: expert.bias, round });
 
-  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use the WebSearch tool to research current facts before you commit to a number. Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
+  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use web search to research current facts before you commit to a number. Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
 
-  const full = await runQuery(
-    userPrompt,
-    { system, model: EXPERT_MODEL, tools: ["WebSearch", "WebFetch"], maxTurns: 16 },
+  const full = await runAgent(
+    { role: "expert", system, prompt: userPrompt, webSearch: true, maxTurns: 16 },
     {
       onText: (text) => emit({ type: "delta", expertId: expert.id, round, text }),
       onThink: (text) => emit({ type: "think", expertId: expert.id, round, text }),
@@ -229,7 +157,11 @@ export async function runCouncil(card: Card, emit: Emit): Promise<void> {
   const brief = cardBrief(card);
 
   // ---- Round 1: independent research ----
-  emit({ type: "status", phase: "research", message: "Council researching independently…" });
+  emit({
+    type: "status",
+    phase: "research",
+    message: `Council researching independently (via ${providerLabel()})…`,
+  });
 
   const round1Prompt = `Here is the card under review:\n\n${brief}\n\nResearch this outcome and give your independent assessment. End your response with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
@@ -269,9 +201,8 @@ disagreement is most informative. Be decisive but honest about uncertainty.\n\n$
 
   const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the five pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
 
-  await runQuery(
-    synthPrompt,
-    { system: synthSystem, model: SYNTH_MODEL, tools: [], maxTurns: 2 },
+  await runAgent(
+    { role: "synth", system: synthSystem, prompt: synthPrompt, webSearch: false, maxTurns: 2 },
     { onText: (text) => emit({ type: "verdict_delta", text }) }
   );
 
