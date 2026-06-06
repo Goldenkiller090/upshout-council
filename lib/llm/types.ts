@@ -24,6 +24,15 @@ export interface RunRequest {
   signal?: AbortSignal;
 }
 
+/** Token/cost accounting for one completed turn (zeros when a provider can't report it). */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+}
+
 export interface RunCallbacks {
   /** Streamed assistant text (deltas). */
   onText: (text: string) => void;
@@ -31,6 +40,8 @@ export interface RunCallbacks {
   onThink?: (text: string) => void;
   /** Tool activity (web search, shell, etc.) surfaced as live status. */
   onTool?: (tool: string, detail: string) => void;
+  /** Token/cost usage for the turn, reported once when the turn completes. */
+  onUsage?: (usage: TurnUsage) => void;
 }
 
 /** Runs one turn, streaming via callbacks, and resolves with the full final text. */

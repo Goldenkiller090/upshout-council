@@ -1119,3 +1119,47 @@ button.stop:hover:not(:disabled) {
 }
 .picker-filter:focus { outline: none; border-color: var(--line-strong); }
 .picker-filter option { background: var(--bg-2); color: var(--ink); }
+
+/* ---- Live token/cost readout in the status ticker ---- */
+/* After the flex:1 status-span rule so it wins and doesn't stretch. */
+.status > span.cost {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim, #8a8f98);
+  white-space: nowrap;
+}
+
+/* ---- Batch + per-row token/cost tallies ---- */
+.batchcost {
+  margin-left: auto;
+  margin-right: 12px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim, #8a8f98);
+  white-space: nowrap;
+}
+.erow-cost {
+  font-size: 10px;
+  color: var(--ink-dim, #8a8f98);
+  letter-spacing: 0.06em;
+}
+
+/* ---- History tab ---- */
+.history { margin-bottom: 24px; }
+.hist-empty {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-dim, #8a8f98);
+  padding: 14px 4px;
+}
+.hist-row { cursor: pointer; }
+.hist-row:hover .erow-name { color: var(--cyan); }
+.hist-verdict {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-top: none;
+  padding: 14px 18px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.hist-verdict .buybtn { margin-top: 10px; display: inline-block; }

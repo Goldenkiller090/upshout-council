@@ -10,6 +10,29 @@ function model(role: RunRequest["role"]): string {
     : process.env.CLAUDE_EXPERT_MODEL ?? "sonnet";
 }
 
+// Tools the council never uses. `allowedTools` only auto-approves — it does NOT
+// remove tool schemas from the request, so without this every turn ships several
+// thousand tokens of Bash/Read/Edit/… definitions the experts can never call.
+const UNUSED_TOOLS = [
+  "Task",
+  "Bash",
+  "BashOutput",
+  "KillShell",
+  "Glob",
+  "Grep",
+  "Read",
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  "NotebookRead",
+  "TodoWrite",
+  "ExitPlanMode",
+  "SlashCommand",
+  "ListMcpResourcesTool",
+  "ReadMcpResourceTool",
+];
+
 /** Summarize a tool call's input into a short human label. */
 function toolDetail(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
@@ -36,6 +59,9 @@ export async function runClaude(req: RunRequest, cb: RunCallbacks): Promise<stri
     systemPrompt: req.system,
     model: model(req.role),
     allowedTools: req.webSearch ? ["WebSearch", "WebFetch"] : [],
+    // Strip the schemas of everything we don't use (and search itself on
+    // no-search turns) — pure input-token waste otherwise.
+    disallowedTools: req.webSearch ? UNUSED_TOOLS : [...UNUSED_TOOLS, "WebSearch", "WebFetch"],
     includePartialMessages: true,
     maxTurns: req.maxTurns,
     permissionMode: "bypassPermissions",
@@ -73,6 +99,25 @@ export async function runClaude(req: RunRequest, cb: RunCallbacks): Promise<stri
       }
     } else if (message.type === "result") {
       if (message.subtype === "success") finalText = message.result;
+      // Surface token/cost usage so the council can track spend per card.
+      const m = message as unknown as {
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+        total_cost_usd?: number;
+      };
+      if (m.usage) {
+        cb.onUsage?.({
+          inputTokens: m.usage.input_tokens ?? 0,
+          outputTokens: m.usage.output_tokens ?? 0,
+          cacheReadTokens: m.usage.cache_read_input_tokens ?? 0,
+          cacheCreationTokens: m.usage.cache_creation_input_tokens ?? 0,
+          costUsd: m.total_cost_usd ?? 0,
+        });
+      }
     }
   }
 

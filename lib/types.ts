@@ -65,6 +65,14 @@ export type CouncilEvent =
   | { type: "expert_done"; expertId: string; round: number }
   | { type: "verdict_delta"; text: string }
   | {
+      /** Cumulative token/cost spend for this card so far (updated per turn). */
+      type: "cost";
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      costUsd: number;
+    }
+  | {
       type: "reconcile";
       min: number;
       max: number;

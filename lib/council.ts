@@ -2,19 +2,25 @@ import type { Card, CouncilEvent, Expert } from "./types";
 import { EXPERTS } from "./experts";
 import { fromMicro } from "./upshot";
 import { runAgent, providerLabel } from "./llm";
-import { extractCall, extractVerdictProb } from "./parse";
+import type { TurnUsage } from "./llm/types";
+import { extractCall, extractVerdictProb, extractVerdictCall } from "./parse";
+import { saveRun } from "./db";
 
 // Per-turn timeouts so one hung agent can't stall the batch (overridable via env).
 const EXPERT_TIMEOUT_MS = Number(process.env.COUNCIL_EXPERT_TIMEOUT_MS ?? 210_000);
 const SYNTH_TIMEOUT_MS = Number(process.env.COUNCIL_SYNTH_TIMEOUT_MS ?? 180_000);
 
-/** One-line, token-cheap digest of a round-1 take for feeding to others/the synth. */
-function digest(expert: Expert, text: string): string {
+// Round-1 agentic turn cap. Each extra turn re-sends the whole growing context
+// (including fetched pages), so the loop's cost grows quadratically — keep it tight.
+const R1_MAX_TURNS = Number(process.env.COUNCIL_R1_MAX_TURNS ?? 4);
+
+/** Token-cheap digest of a take for feeding to others/the synth. */
+function digest(expert: Expert, text: string, maxChars = 280, tag = ""): string {
   const { prob, lean } = extractCall(text);
   const body = text.replace(/PROBABILITY:[\s\S]*$/i, "").trim();
-  const thesis = body.replace(/\s+/g, " ").slice(0, 280);
-  return `### ${expert.name} (${expert.bias}) — ${prob ?? "?"}% · ${lean ?? "?"}\n${thesis}${
-    body.length > 280 ? "…" : ""
+  const thesis = body.replace(/\s+/g, " ").slice(0, maxChars);
+  return `### ${expert.name} (${expert.bias})${tag} — ${prob ?? "?"}% · ${lean ?? "?"}\n${thesis}${
+    body.length > maxChars ? "…" : ""
   }`;
 }
 
@@ -166,17 +172,27 @@ Judging value (BUY / HOLD / PASS):
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-/** Run one expert turn with web search; forwards deltas and returns full text. */
+/**
+ * Run one expert turn; forwards deltas and returns full text. Round 1 researches
+ * with web search; round 2 is a single no-search turn — the rebuttal reasons over
+ * round-1 findings instead of re-running the (expensive) agentic search loop.
+ */
 async function runExpert(
   expert: Expert,
   userPrompt: string,
   round: number,
   emit: Emit,
-  outerSignal?: AbortSignal
+  outerSignal?: AbortSignal,
+  onUsage?: (u: TurnUsage) => void
 ): Promise<string> {
   emit({ type: "expert_start", expertId: expert.id, name: expert.name, bias: expert.bias, round });
 
-  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. Use web search to research current facts BEFORE you commit to a number — weight the most recent information heavily and stamp the date of time-sensitive facts (a settled or stale fact must not be treated as a live forecast). Cite what you find. Keep your written analysis tight — a few short paragraphs.`;
+  const roundDirective =
+    round === 1
+      ? `Use web search to research current facts BEFORE you commit to a number — weight the most recent information heavily and stamp the date of time-sensitive facts (a settled or stale fact must not be treated as a live forecast). Cite what you find.`
+      : `You have NO web access this turn. Argue strictly from your round-1 research (included below) and the other council members' takes — do not invent new facts.`;
+
+  const system = `${expert.persona}\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}. ${roundDirective} Keep your written analysis under 150 words — dense and factual, no filler.`;
 
   // Per-expert timeout: abort a hung turn but keep whatever it streamed so the
   // debate and synthesis still have signal from it.
@@ -191,7 +207,14 @@ async function runExpert(
   let full = "";
   try {
     full = await runAgent(
-      { role: "expert", system, prompt: userPrompt, webSearch: true, maxTurns: 16, signal: controller.signal },
+      {
+        role: "expert",
+        system,
+        prompt: userPrompt,
+        webSearch: round === 1,
+        maxTurns: round === 1 ? R1_MAX_TURNS : 1,
+        signal: controller.signal,
+      },
       {
         onText: (text) => {
           acc += text;
@@ -199,6 +222,7 @@ async function runExpert(
         },
         onThink: (text) => emit({ type: "think", expertId: expert.id, round, text }),
         onTool: (tool, detail) => emit({ type: "tool", expertId: expert.id, round, tool, detail }),
+        onUsage,
       }
     );
   } catch {
@@ -229,6 +253,23 @@ async function runExpert(
 export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): Promise<void> {
   const brief = cardBrief(card);
 
+  // Running token/cost totals for the whole card — emitted after every turn so
+  // the UI always shows the live spend.
+  const totals = { input: 0, output: 0, cacheRead: 0, costUsd: 0 };
+  const onUsage = (u: TurnUsage) => {
+    totals.input += u.inputTokens + u.cacheCreationTokens;
+    totals.output += u.outputTokens;
+    totals.cacheRead += u.cacheReadTokens;
+    totals.costUsd += u.costUsd;
+    emit({
+      type: "cost",
+      inputTokens: totals.input,
+      outputTokens: totals.output,
+      cacheReadTokens: totals.cacheRead,
+      costUsd: totals.costUsd,
+    });
+  };
+
   // Bail the instant the client stops listening (Stop / NEW BATCH / disconnect).
   // Without this, an aborted run still launches round 2 (4 turns) + synth, burning
   // the subscription on work nobody will see.
@@ -245,7 +286,7 @@ export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): 
   const round1Prompt = `Here is the card under review:\n\n${brief}\n\nResearch this outcome and give your independent assessment. End your response with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
   const round1 = await Promise.all(
-    EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit, signal))
+    EXPERTS.map((e) => runExpert(e, round1Prompt, 1, emit, signal, onUsage))
   );
 
   if (aborted()) return;
@@ -260,17 +301,18 @@ export async function runCouncil(card: Card, emit: Emit, signal?: AbortSignal): 
         .filter(Boolean)
         .join("\n\n");
 
-      const prompt = `The card under review:\n\n${brief}\n\nHere are the other council members' first-round takes (digested):\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Research further if needed. Then give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
+      // Round 2 has no web search, so the expert needs its OWN round-1 research
+      // back (a fresh query has no memory of it) plus the others' digests.
+      const prompt = `The card under review:\n\n${brief}\n\nYOUR round-1 research and take:\n\n${round1[selfIdx].trim()}\n\nHere are the other council members' first-round takes (digested):\n\n${others}\n\nWhere do you disagree with them, and why? Do any of their points change your view? Give your UPDATED assessment, ending with two lines exactly:\nPROBABILITY: <0-100>%\nLEAN: <BUY | HOLD | PASS>`;
 
-      return runExpert(e, prompt, 2, emit, signal);
+      return runExpert(e, prompt, 2, emit, signal, onUsage);
     })
   );
 
-  // Synth gets each pilot's FINAL (round-2) take in full, plus a one-line digest of
-  // where they started — enough to see movement without re-sending both rounds whole.
+  // Synth gets a short digest of where each pilot started plus a larger digest of
+  // their FINAL take — the chair weighs positions, it doesn't need full transcripts.
   const finalTakes = EXPERTS.map(
-    (e, i) =>
-      `${digest(e, round1[i])}\n\n### ${e.name} (${e.bias}) — FINAL take (after debate):\n${round2[i].trim()}`
+    (e, i) => `${digest(e, round1[i])}\n${digest(e, round2[i], 700, " · FINAL after debate")}`
   ).join("\n\n");
 
   if (aborted()) return;
@@ -283,7 +325,7 @@ biases (a quant on base rates, a domain insider on resolution mechanics, a contr
 have each researched and debated a card. Weigh their arguments — don't just average them. Note where they agree
 and where the disagreement is most informative. Be decisive but honest about uncertainty.\n\n${SHARED_CONTEXT}\n\nToday's date is ${today()}.`;
 
-  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the four pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.`;
+  const synthPrompt = `The card under review:\n\n${brief}\n\nThe council's takes:\n\n${finalTakes}\n\nDeliver the final verdict in markdown with these sections:\n\n## Verdict\nOne punchy sentence.\n\n## Final probability\nA single number 0–100% that the card WINS, plus your confidence (Low / Medium / High).\n\n## The split\nState the range of the four pilots' probabilities (lowest–highest, naming who anchored each end), then call out the SINGLE most informative disagreement — the one clash that actually matters for the decision — and say which side you sided with and why. Don't just note they agreed; surface where the tension was.\n\n## Recommendation\nBUY, HOLD, or PASS — and at the current price, is it +EV? One short paragraph.\n\n## Key factors\n3–5 bullets driving the call.\n\n## Risks\n2–3 bullets on what would make this wrong.\n\nKeep the whole verdict under 300 words.`;
 
   const synthController = new AbortController();
   const synthTimer = setTimeout(() => synthController.abort(), SYNTH_TIMEOUT_MS);
@@ -307,6 +349,7 @@ and where the disagreement is most informative. Be decisive but honest about unc
           verdictText += text;
           emit({ type: "verdict_delta", text });
         },
+        onUsage,
       }
     );
   } catch {
@@ -331,6 +374,24 @@ and where the disagreement is most informative. Be decisive but honest about unc
     const divergent =
       headline != null && (headline < min || headline > max || Math.abs(headline - mid) > 15);
     emit({ type: "reconcile", min, max, median: mid, headline, divergent });
+  }
+
+  // Persist the finished run to local history (fail-soft; skip aborted/empty runs).
+  if (!aborted() && verdictText.trim()) {
+    saveRun({
+      cardId: card.id,
+      cardName: card.name,
+      outcomeName: card.outcomeName ?? null,
+      eventName: card.event?.name ?? null,
+      probability: extractVerdictProb(verdictText),
+      call: extractVerdictCall(verdictText),
+      verdict: verdictText.trim(),
+      inputTokens: totals.input,
+      outputTokens: totals.output,
+      cacheReadTokens: totals.cacheRead,
+      costUsd: totals.costUsd,
+      cardJson: JSON.stringify(card),
+    });
   }
 
   emit({ type: "done" });

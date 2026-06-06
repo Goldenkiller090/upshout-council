@@ -41,9 +41,14 @@ before trusting the number.
    blocks the request (HTML challenge), the UI falls back to pasting the card JSON
    (`POST /api/card`).
 2. **Convene the council** — `POST /api/council` streams the deliberation over SSE:
-   - **Round 1** — the four experts research independently (parallel, web search).
-   - **Round 2** — each rebuts the others after seeing their takes.
+   - **Round 1** — the four experts research independently (parallel, web search,
+     agentic loop capped at `COUNCIL_R1_MAX_TURNS`, default 4).
+   - **Round 2** — each rebuts the others after seeing their takes. This is a **single
+     no-web-search turn**: the expert gets its own round-1 research back plus digests of
+     the others, and argues from that. (Re-running the agentic search loop here was the
+     single biggest token sink.)
    - **Synthesis** — a final verdict weighs the arguments into one probability + call.
+     The chair reads **digests** of each pilot's takes, not full transcripts.
 
 The orchestration (`lib/council.ts`) is provider-agnostic: it asks `lib/llm` to run each
 turn, and `lib/llm` dispatches to whichever backend you selected.
@@ -62,6 +67,42 @@ turn, and `lib/llm` dispatches to whichever backend you selected.
 Experts and the synthesizer all run on Sonnet / `gpt-5-codex` by default — a synth turn
 runs per card, and Opus is ~5× the cost, so it is **not** the default. Override with
 `CLAUDE_SYNTH_MODEL=opus` only if you accept that burn. All via your subscription — see below.
+
+### Token budget & live cost readout
+
+A single card is **9 LLM calls** (4 research + 4 rebuttals + 1 synthesis); an event can be
+10+ cards, so the pipeline is aggressively token-tuned:
+
+- Round 1's agentic search loop is capped (`COUNCIL_R1_MAX_TURNS=4` by default) — each
+  extra turn re-sends the whole growing context including fetched pages, so cost grows
+  quadratically with turns. Raise it (e.g. `6`) if research feels thin.
+- Round 2 runs **without web search** as a single turn (see above).
+- Unused tool schemas (Bash/Read/Edit/…) are stripped from every request — `allowedTools`
+  alone only gates permissions, it doesn't remove the schema tokens.
+- Experts are budgeted to ~150 words, the verdict to ~300.
+
+Every turn reports its real usage: the UI shows a **live token/cost tally** per card (in
+the status ticker, and per row in Event mode) plus a **Σ batch total** in the batch bar.
+On API-key billing the dollar cost shows too; on a subscription it's tokens only.
+
+### Run history (local SQLite)
+
+Every finished run is saved to a **local SQLite DB** — `data/council.db`, created
+automatically on first use (override the path with `COUNCIL_DB_PATH`; the `data/` dir is
+gitignored). Stored per run: card/event/outcome, final probability + call, the full verdict
+markdown, token/cost totals, and a timestamp.
+
+The **HISTORY** tab in the UI lists past researches (newest first) with search, expandable
+verdicts, per-run delete, and CLEAR ALL. Programmatic access:
+
+```bash
+GET    /api/history?search=&limit=   # list runs (JSON)
+DELETE /api/history?id=N             # delete one
+DELETE /api/history?all=1            # wipe history
+```
+
+Saving is fail-soft: a broken DB never kills a live council stream. Aborted/stopped runs
+are not saved.
 
 ---
 
@@ -177,6 +218,8 @@ Restart `npm run dev` after changing `.env.local`.
 | `UPSHOT_COOKIE` | — | Bunny Shield cookies (the part that clears the shield) |
 | `COUNCIL_EXPERT_TIMEOUT_MS` | `210000` | abort a hung expert turn (keeps partial output) |
 | `COUNCIL_SYNTH_TIMEOUT_MS` | `180000` | abort a hung synthesis turn |
+| `COUNCIL_R1_MAX_TURNS` | `4` | round-1 agentic search turn cap per expert (cost grows quadratically) |
+| `COUNCIL_DB_PATH` | `data/council.db` | where the SQLite run history lives |
 
 ### Pricing & expected value
 
@@ -208,16 +251,19 @@ app/
   globals.css           # the whole aesthetic
   api/card/route.ts     # fetch / paste-fallback
   api/council/route.ts  # SSE deliberation stream
+  api/history/route.ts  # run history: list / delete (local SQLite)
 lib/
   council.ts            # orchestration (rounds + synthesis), provider-agnostic
   llm/
     index.ts            # provider dispatch (LLM_PROVIDER) + runAgent()
     claude.ts           # Claude Agent SDK runner (Claude sub)
     codex.ts            # Codex SDK runner (ChatGPT sub)
-    types.ts            # shared RunRequest / callbacks contract
+    types.ts            # shared RunRequest / callbacks / TurnUsage contract
+  db.ts                 # SQLite run history (auto-created at data/council.db)
   experts.ts            # the four personas
   upshot.ts             # Upshot client + Bunny Shield detection
   types.ts
+data/council.db         # local run history (gitignored, created on first run)
 upshot-api/             # cloned API docs (reference)
 ```
 

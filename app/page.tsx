@@ -17,12 +17,35 @@ function readout(st?: ExpertState): { prob: number | null; lean: string | null }
   return extractCall(`${st?.r1.text ?? ""}\n${st?.r2.text ?? ""}`);
 }
 
+/** Compact token count, e.g. 41_300 -> "41.3k". */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** Cumulative per-card spend, as carried by `cost` events. */
+type CostTotals = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+};
+
+/** Render a cost tally as a compact one-liner, e.g. "41.3k in · 6.2k out · $0.09". */
+function fmtCost(c: CostTotals): string {
+  let s = `${fmtTokens(c.inputTokens)} in · ${fmtTokens(c.outputTokens)} out`;
+  if (c.cacheReadTokens > 0) s += ` · ${fmtTokens(c.cacheReadTokens)} cached`;
+  if (c.costUsd > 0) s += ` · $${c.costUsd.toFixed(2)}`;
+  return s;
+}
+
 type Phase = "idle" | "research" | "debate" | "verdict" | "done";
 
 const CONCURRENCY = 3; // councils streaming at once (shared single subscription)
 
 export default function Home() {
-  const [mode, setMode] = useState<"link" | "wallet" | "event">("link");
+  const [mode, setMode] = useState<"link" | "wallet" | "event" | "history">("link");
   const [input, setInput] = useState(""); // one or many IDs/URLs (newline/comma separated)
   const [wallet, setWallet] = useState("");
   const [eventUrl, setEventUrl] = useState("");
@@ -50,12 +73,30 @@ export default function Home() {
     []
   );
 
+  // Latest cumulative spend per card, reported up by each run for the batch total.
+  const [costs, setCosts] = useState<Record<string, CostTotals>>({});
+  const reportCost = useCallback(
+    (id: string, c: CostTotals) => setCosts((p) => ({ ...p, [id]: c })),
+    []
+  );
+  const batchCost = useMemo(() => {
+    const sum: CostTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
+    for (const c of Object.values(costs)) {
+      sum.inputTokens += c.inputTokens;
+      sum.outputTokens += c.outputTokens;
+      sum.cacheReadTokens += c.cacheReadTokens;
+      sum.costUsd += c.costUsd;
+    }
+    return sum.inputTokens || sum.outputTokens ? sum : null;
+  }, [costs]);
+
   // `compact` is the event view: just the verdict per card, no debate/stream UI.
   function startBatch(cards: Card[], view: "full" | "compact" = "full", title = "") {
     const seen = new Set<string>();
     const uniq = cards.filter((c) => c.id && !seen.has(c.id) && seen.add(c.id));
     if (!uniq.length) return;
     setDoneIds(new Set());
+    setCosts({});
     setRunView(view);
     setBatchTitle(title);
     setRuns(uniq);
@@ -64,6 +105,7 @@ export default function Home() {
   function resetBatch() {
     setRuns([]);
     setDoneIds(new Set());
+    setCosts({});
     setBatchTitle("");
     setError("");
   }
@@ -250,7 +292,12 @@ export default function Home() {
         <button className={mode === "event" ? "on" : ""} onClick={() => setMode("event")}>
           EVENT
         </button>
+        <button className={mode === "history" ? "on" : ""} onClick={() => setMode("history")}>
+          HISTORY
+        </button>
       </div>
+
+      {mode === "history" && <HistoryPanel />}
 
       {mode === "link" && (
         <div className="searchbar col">
@@ -404,6 +451,11 @@ export default function Home() {
               {runs.length} CARD{runs.length > 1 ? "S" : ""} · {doneIds.size}/{runs.length} DONE ·
               MAX {CONCURRENCY} LIVE
             </span>
+            {batchCost && (
+              <span className="batchcost" title="Total spend across the whole batch so far">
+                Σ {fmtCost(batchCost)}
+              </span>
+            )}
             <button className="ghost" onClick={resetBatch}>
               NEW BATCH
             </button>
@@ -411,13 +463,13 @@ export default function Home() {
           {runView === "compact" ? (
             <div className="event-list">
               {runs.map((c, i) => (
-                <EventRow key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
+                <EventRow key={c.id} card={c} active={activeFor(i)} onDone={markDone} onCost={reportCost} />
               ))}
             </div>
           ) : (
             <div className="runs">
               {runs.map((c, i) => (
-                <CouncilRun key={c.id} card={c} active={activeFor(i)} onDone={markDone} />
+                <CouncilRun key={c.id} card={c} active={activeFor(i)} onDone={markDone} onCost={reportCost} />
               ))}
             </div>
           )}
@@ -433,19 +485,162 @@ export default function Home() {
 
 // Compact event-mode run: same council + debate under the hood, but we skip the
 // streaming/debate UI and surface only the final verdict (events can have many cards).
+// ---- History: past council runs from the local SQLite DB ----
+
+type HistoryRun = {
+  id: number;
+  createdAt: string;
+  cardId: string;
+  cardName: string;
+  outcomeName: string | null;
+  eventName: string | null;
+  probability: number | null;
+  call: string | null;
+  verdict: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+};
+
+function HistoryPanel() {
+  const [runs, setRuns] = useState<HistoryRun[] | null>(null);
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  const [error, setError] = useState("");
+
+  const load = useCallback(async (q: string) => {
+    try {
+      const res = await fetch(`/api/history?search=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "failed to load history");
+      setRuns(data.runs as HistoryRun[]);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to load history");
+    }
+  }, []);
+
+  // Load on open; refetch (debounced) as the search changes.
+  useEffect(() => {
+    const t = setTimeout(() => load(search), search ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [search, load]);
+
+  async function remove(id: number) {
+    await fetch(`/api/history?id=${id}`, { method: "DELETE" });
+    setRuns((p) => p?.filter((r) => r.id !== id) ?? p);
+  }
+
+  async function clearAll() {
+    if (!confirm("Wipe the entire research history?")) return;
+    await fetch(`/api/history?all=1`, { method: "DELETE" });
+    setRuns([]);
+  }
+
+  function toggleOpen(id: number) {
+    setOpen((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+
+  // SQLite stores datetime('now') in UTC without a zone marker — pin it.
+  const fmtDate = (s: string) => new Date(s.replace(" ", "T") + "Z").toLocaleString();
+
+  return (
+    <div className="history">
+      <div className="searchbar">
+        <span className="lead">SEARCH ▸</span>
+        <input
+          placeholder="filter by card, event, or outcome…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+        <button className="ghost" onClick={clearAll} disabled={!runs?.length}>
+          CLEAR ALL
+        </button>
+      </div>
+
+      {error && <p className="error">{error}</p>}
+      {runs === null && !error && <p className="hist-empty">Loading history…</p>}
+      {runs?.length === 0 && <p className="hist-empty">No saved researches yet — run a council and it lands here.</p>}
+
+      {!!runs?.length && (
+        <div className="event-list">
+          {runs.map((r) => (
+            <div key={r.id} className="hist-item">
+              <div className="erow done hist-row" onClick={() => toggleOpen(r.id)}>
+                <span className="erow-dot" />
+                <div className="erow-main">
+                  <div className="erow-name">{r.outcomeName || r.cardName}</div>
+                  <div className="erow-sub">
+                    {r.outcomeName ? r.cardName : r.eventName ?? ""}
+                    <span className="erow-cost">
+                      {" "}· {fmtDate(r.createdAt)} ·{" "}
+                      {fmtCost({
+                        inputTokens: r.inputTokens,
+                        outputTokens: r.outputTokens,
+                        cacheReadTokens: r.cacheReadTokens,
+                        costUsd: r.costUsd,
+                      })}
+                    </span>
+                  </div>
+                </div>
+                <div className="erow-state">
+                  <span className="erow-prob">{r.probability != null ? `${r.probability}%` : "—"}</span>
+                  {r.call && <span className={`callbadge sm ${r.call}`}>{r.call}</span>}
+                </div>
+                <button
+                  className="stop sm"
+                  title="Delete this run"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(r.id);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              {open.has(r.id) && (
+                <div className="hist-verdict">
+                  <Verdict text={r.verdict} />
+                  <a
+                    className="buybtn"
+                    href={`https://upshot.cards/card-detail/${r.cardId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    VIEW CARD ↗
+                  </a>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EventRow({
   card,
   active,
   onDone,
+  onCost,
 }: {
   card: Card;
   active: boolean;
   onDone: (id: string) => void;
+  onCost?: (id: string, c: CostTotals) => void;
 }) {
   const [phase, setPhase] = useState<"queued" | "running" | "done" | "error" | "stopped">(
     active ? "running" : "queued"
   );
   const [verdict, setVerdict] = useState("");
+  const [cost, setCost] = useState<CostTotals | null>(null);
   const [errMsg, setErrMsg] = useState("");
   const started = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -485,7 +680,16 @@ function EventRow({
             if (!json) continue;
             const ev = JSON.parse(json) as CouncilEvent;
             if (ev.type === "verdict_delta") setVerdict((v) => v + ev.text);
-            else if (ev.type === "error") {
+            else if (ev.type === "cost") {
+              const c = {
+                inputTokens: ev.inputTokens,
+                outputTokens: ev.outputTokens,
+                cacheReadTokens: ev.cacheReadTokens,
+                costUsd: ev.costUsd,
+              };
+              setCost(c);
+              onCost?.(card.id, c);
+            } else if (ev.type === "error") {
               failed = true;
               setErrMsg(ev.message);
             } else if (ev.type === "done") setPhase((p) => (p === "running" ? "done" : p));
@@ -524,7 +728,10 @@ function EventRow({
       <span className="erow-dot" />
       <div className="erow-main">
         <div className="erow-name">{card.outcomeName || card.name}</div>
-        <div className="erow-sub">{card.outcomeName ? card.name : card.event?.name ?? ""}</div>
+        <div className="erow-sub">
+          {card.outcomeName ? card.name : card.event?.name ?? ""}
+          {cost && <span className="erow-cost"> · {fmtCost(cost)}</span>}
+        </div>
       </div>
       <div className="erow-state">
         {phase === "queued" && <span className="erow-tag">QUEUED</span>}
@@ -567,10 +774,12 @@ function CouncilRun({
   card: initialCard,
   active,
   onDone,
+  onCost,
 }: {
   card: Card;
   active: boolean;
   onDone: (id: string) => void;
+  onCost?: (id: string, c: CostTotals) => void;
 }) {
   const [card, setCard] = useState<Card>(initialCard);
   const [experts, setExperts] = useState<Record<string, ExpertState>>(() =>
@@ -587,6 +796,7 @@ function CouncilRun({
     headline: number | null;
     divergent: boolean;
   } | null>(null);
+  const [cost, setCost] = useState<CostTotals | null>(null);
   const [stopped, setStopped] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -644,6 +854,17 @@ function CouncilRun({
         case "verdict_delta":
           setVerdict((v) => v + ev.text);
           break;
+        case "cost": {
+          const c = {
+            inputTokens: ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            cacheReadTokens: ev.cacheReadTokens,
+            costUsd: ev.costUsd,
+          };
+          setCost(c);
+          onCost?.(initialCard.id, c);
+          break;
+        }
         case "reconcile":
           setRecon({
             min: ev.min,
@@ -720,6 +941,11 @@ function CouncilRun({
       <div className="status">
         {running && !stopped && <span className="spinner" />}
         <span>{queued ? "Queued — waiting for a free slot…" : status}</span>
+        {cost && (
+          <span className="cost" title="Cumulative spend for this card (cache reads shown separately)">
+            {fmtCost(cost)}
+          </span>
+        )}
         {!stopped && (running || queued) && (
           <button className="stop" onClick={stop}>
             ◼ STOP

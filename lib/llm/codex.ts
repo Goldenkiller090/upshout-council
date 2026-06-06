@@ -78,6 +78,18 @@ export async function runCodex(req: RunRequest, cb: RunCallbacks): Promise<strin
   for await (const ev of events) {
     if (ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed") {
       handle(ev.item);
+    } else if (ev.type === "turn.completed") {
+      // Codex reports token usage per turn (no cost — subscription-billed).
+      const u = (ev as { usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number } }).usage;
+      if (u) {
+        cb.onUsage?.({
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          cacheReadTokens: u.cached_input_tokens ?? 0,
+          cacheCreationTokens: 0,
+          costUsd: 0,
+        });
+      }
     } else if (ev.type === "turn.failed") {
       throw new Error(ev.error?.message ?? "Codex turn failed");
     } else if (ev.type === "error") {
